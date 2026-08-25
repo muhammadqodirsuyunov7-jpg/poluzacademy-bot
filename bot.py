@@ -1029,10 +1029,36 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 # ═══════════════════════════════════════════
+# RENDER.COM UCHUN HEALTH CHECK SERVER
+# ═══════════════════════════════════════════
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"PolUzAcademy Bot is running 24/7!")
+
+    def log_message(self, format, *args):
+        return  # Ortiqcha loglarni chiqarmaslik
+
+def start_health_server():
+    port_str = os.environ.get("PORT")
+    if port_str and port_str.isdigit():
+        port = int(port_str)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"✅ Render.com Health Check server {port}-portda ishga tushdi!")
+
+# ═══════════════════════════════════════════
 # ASOSIY ISHGA TUSHIRISH (MAIN)
 # ═══════════════════════════════════════════
 def main():
     init_db()
+    start_health_server()
     print("🦉 PolUzAcademy Bot ishga tushmoqda...")
 
     app = Application.builder().token(BOT_TOKEN).build()
