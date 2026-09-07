@@ -9,7 +9,17 @@ Duolingo uslubida: darslar, testlar, audio talaffuz, BLIK/Karta to'lovlari.
 import logging
 import sqlite3
 import os
+import sys
 from datetime import date, datetime, timedelta
+
+# Windows konsolida Unicode/emoji (cp1250) xatoliklarini oldini olish
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -100,6 +110,11 @@ def init_db():
             xp_earned INTEGER DEFAULT 0
         );
     """)
+    # Avtomatik migratsiya: agar users jadvalida created_at ustuni bo'lmasa, qo'shish
+    cur = con.cursor()
+    user_cols = [c[1] for c in cur.execute("PRAGMA table_info(users)").fetchall()]
+    if "created_at" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
     con.commit()
     con.close()
 
@@ -1075,6 +1090,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.job_queue.run_repeating(daily_reminder, interval=60, first=10)
+
+    async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error("Botda kutilmagan xatolik yuz berdi:", exc_info=context.error)
+
+    app.add_error_handler(on_error)
 
     async def post_init(application):
         await application.bot.set_my_commands([
