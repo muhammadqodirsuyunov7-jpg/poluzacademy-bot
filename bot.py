@@ -45,7 +45,15 @@ import tts
 # ═══════════════════════════════════════════
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8749989883:AAGX0RiQ32ExbIayYbevhxxBkDIxL-QEN0k")
 DB_PATH   = "polyakcha.db"
-ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "1628696149,8022251674").split(",") if x.strip().isdigit()]
+# Doimiy asosiy adminlar (har qanday holatda admin huquqiga ega)
+MASTER_ADMINS = [1628696149, 8022251674]
+import re
+_env_admins = [int(x) for x in re.findall(r'\d+', os.environ.get("ADMIN_IDS", ""))]
+ADMIN_IDS = list(dict.fromkeys(MASTER_ADMINS + _env_admins))
+
+def is_admin(user_id: int) -> bool:
+    """Foydalanuvchi admin ekanligini tekshiradi."""
+    return (user_id in ADMIN_IDS) or (user_id in MASTER_ADMINS)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -996,8 +1004,7 @@ async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    # Agar admin bo'lsa yoki ADMIN_IDS bo'sh bo'lsa (barcha egalar)
-    if ADMIN_IDS and uid not in ADMIN_IDS and 0 not in ADMIN_IDS:
+    if not is_admin(uid):
         await update.message.reply_text(
             f"⛔️ *Sizda admin huquqi yo'q.*\n\n"
             f"🆔 Sizning Telegram ID: `{uid}`\n"
@@ -1023,7 +1030,8 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_grant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if ADMIN_IDS and uid not in ADMIN_IDS and 0 not in ADMIN_IDS:
+    if not is_admin(uid):
+        await update.message.reply_text("⛔️ Bu buyruq faqat adminlar uchun.")
         return
     
     args = ctx.args
