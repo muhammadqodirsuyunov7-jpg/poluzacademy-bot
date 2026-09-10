@@ -45,7 +45,7 @@ import tts
 # ═══════════════════════════════════════════
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8749989883:AAGX0RiQ32ExbIayYbevhxxBkDIxL-QEN0k")
 DB_PATH   = "polyakcha.db"
-ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "1628696149").split(",") if x.strip().isdigit()]
+ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "1628696149,8022251674").split(",") if x.strip().isdigit()]
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -987,11 +987,23 @@ async def cmd_lugat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_premium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await payments.show_premium(update, ctx)
 
+async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text(
+        f"🆔 *Sizning Telegram ID raqamingiz:* `{uid}`",
+        parse_mode="Markdown"
+    )
+
 async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     # Agar admin bo'lsa yoki ADMIN_IDS bo'sh bo'lsa (barcha egalar)
     if ADMIN_IDS and uid not in ADMIN_IDS and 0 not in ADMIN_IDS:
-        await update.message.reply_text("⛔️ Sizda admin huquqi yo'q.")
+        await update.message.reply_text(
+            f"⛔️ *Sizda admin huquqi yo'q.*\n\n"
+            f"🆔 Sizning Telegram ID: `{uid}`\n"
+            f"Admin bo'lish uchun ushbu ID raqamni `ADMIN_IDS` ro'yxatiga qo'shish kerak.",
+            parse_mode="Markdown"
+        )
         return
 
     users_cnt = db("SELECT COUNT(*) as cnt FROM users", (), "one")
@@ -1085,6 +1097,8 @@ def main():
     app.add_handler(CommandHandler("premium",  cmd_premium))
     app.add_handler(CommandHandler("admin",    cmd_admin))
     app.add_handler(CommandHandler("grant",    cmd_grant))
+    app.add_handler(CommandHandler("id",       cmd_id))
+    app.add_handler(CommandHandler("myid",     cmd_id))
     app.add_handler(CommandHandler("help",     payments.show_premium)) # or help
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
