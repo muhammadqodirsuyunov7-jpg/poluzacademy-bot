@@ -35,18 +35,24 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 DAILY_FREE_LIMIT = 5
 
 def get_api_key():
-    key = os.environ.get("GEMINI_API_KEY", "")
-    if not key:
-        env_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-        if os.path.exists(env_f):
-            with open(env_f, "r", encoding="utf-8") as f:
-                for l in f:
-                    l = l.strip()
-                    if l and not l.startswith("#") and l.startswith("GEMINI_API_KEY="):
-                        key = l.split("=", 1)[1].strip()
-                        os.environ["GEMINI_API_KEY"] = key
-                        break
-    return key
+    for var in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_KEY", "gemini_api_key", "google_api_key", "GEMINI_TOKEN"]:
+        val = os.environ.get(var, "").strip().strip("\"'")
+        if val:
+            return val
+
+    env_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_f):
+        with open(env_f, "r", encoding="utf-8") as f:
+            for l in f:
+                l = l.strip()
+                if l and not l.startswith("#") and "=" in l:
+                    k, v = l.split("=", 1)
+                    if k.strip() in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_KEY", "gemini_api_key"]:
+                        val = v.strip().strip("\"'")
+                        if val:
+                            os.environ["GEMINI_API_KEY"] = val
+                            return val
+    return ""
 
 # ═══════════════════════════════════════════
 # TIZIM PROMPTLARI (SYSTEM PROMPTS)
