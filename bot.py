@@ -229,6 +229,14 @@ def level_progress(uid):
         result[lvl] = sum(1 for i in ids if i in done)
     return result
 
+def get_continue_lesson(uid):
+    """Foydalanuvchi to'xtagan (hali tugatilmagan birinchi) darsni topadi."""
+    done = done_lessons(uid)
+    for lid in LESSON_ORDER:
+        if lid not in done:
+            return lid
+    return LESSON_ORDER[-1]
+
 # ═══════════════════════════════════════════
 # KLAVIATURALAR
 # ═══════════════════════════════════════════
@@ -238,19 +246,24 @@ def kb_main(uid: int = None):
         prem_label = "💎 Premium (Faol ✅)"
 
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Qolgan joyidan davom ettirish", callback_data="continue_lesson")],
         [InlineKeyboardButton("📚 Darslar",    callback_data="lessons"),
-         InlineKeyboardButton("📖 Lug'at",     callback_data="vocab_menu")],
-        [InlineKeyboardButton("📊 Progressim", callback_data="progress"),
-         InlineKeyboardButton("⏰ Eslatma",    callback_data="reminder_menu")],
-        [InlineKeyboardButton(prem_label,      callback_data="premium_menu"),
-         InlineKeyboardButton("ℹ️ Kurs haqida", callback_data="about")],
-        [InlineKeyboardButton("❓ Yordam",      callback_data="help")],
+         InlineKeyboardButton("🔄 Boshidan boshlash", callback_data="restart_lessons")],
+        [InlineKeyboardButton("📖 Lug'at",     callback_data="vocab_menu"),
+         InlineKeyboardButton("📊 Progressim", callback_data="progress")],
+        [InlineKeyboardButton("⏰ Eslatma",    callback_data="reminder_menu"),
+         InlineKeyboardButton(prem_label,      callback_data="premium_menu")],
+        [InlineKeyboardButton("ℹ️ Kurs haqida", callback_data="about"),
+         InlineKeyboardButton("❓ Yordam",      callback_data="help")],
     ])
 
 def kb_lessons(uid):
     done = done_lessons(uid)
     is_prem = payments.is_premium(uid)
-    rows = []
+    rows = [
+        [InlineKeyboardButton("▶️ Qolgan joyidan davom ettirish", callback_data="continue_lesson")],
+        [InlineKeyboardButton("🔄 Darslarni boshidan boshlash", callback_data="restart_lessons")],
+    ]
     for lvl, ids in LEVELS.items():
         n_done = sum(1 for i in ids if i in done)
         # Agar bepul bo'lmagan daraja bo'lsa va premium bo'lmasa qulf belgisi
@@ -281,8 +294,9 @@ def kb_level(lvl, uid):
             icon = "🔒 "  # Oldingi dars o'tilmagan
 
         free_badge = " [Bepul]" if is_free else ""
+        les_num = LESSON_ORDER.index(lid) + 1 if lid in LESSON_ORDER else (i + 1)
         rows.append([InlineKeyboardButton(
-            f"{icon}{les.get('emoji','📘')} {les.get('title',lid)}{free_badge}",
+            f"{icon}{les.get('emoji','📘')} {les_num}. {les.get('title',lid)}{free_badge}",
             callback_data=f"lesson:{lid}"
         )])
     rows.append([InlineKeyboardButton("◀️ Darslarga", callback_data="lessons")])
@@ -312,7 +326,7 @@ def kb_exercise(opts, ex_idx):
 
 def kb_after_lesson(lid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ Keyingi dars",   callback_data="lessons")],
+        [InlineKeyboardButton("▶️ Keyingi dars",   callback_data="continue_lesson")],
         [InlineKeyboardButton("🔁 Qayta ishlash",  callback_data=f"go:{lid}")],
         [InlineKeyboardButton("📚 Darslar",        callback_data="lessons"),
          InlineKeyboardButton("🏠 Bosh menyu",     callback_data="main")],
@@ -450,6 +464,97 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
             ]))
 
+    # ── Qolgan joyidan davom ettirish ───────────────
+    elif d == "continue_lesson":
+        lid = get_continue_lesson(uid)
+        les = lesson(lid)
+        les_num = LESSON_ORDER.index(lid) + 1 if lid in LESSON_ORDER else 1
+        done = done_lessons(uid)
+
+        if len(done) == len(LESSON_ORDER):
+            await q.edit_message_text(
+                "🎉 *Tabriklaymiz! Siz barcha 40 ta darsni muvaffaqiyatli tugatgansiz!*\n\n"
+                "Bilimlaringizni mustahkamlash uchun darslarni boshidan qayta boshlashingiz "
+                "yoki istalgan darsni takrorlashingiz mumkin.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Darslarni boshidan boshlash", callback_data="restart_lessons")],
+                    [InlineKeyboardButton("📚 Darslar ro'yxati", callback_data="lessons")],
+                    [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+                ])
+            )
+            return
+
+        ok, reason = can_access_lesson(uid, lid)
+        if reason == "premium_required":
+            await q.edit_message_text(
+                f"🔒 *Navbatdagi dars:* *{les_num}. {les.get('title', lid)}*\n\n"
+                "Ushbu dars faqat **Premium** obunachilar uchun ochiq!\n\n"
+                "Darslarni to'xtovsiz davom ettirish va barcha 40+ darslarni ochish uchun "
+                "Premium obunani faollashtiring.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💎 Premium obunani olish", callback_data="premium_menu")],
+                    [InlineKeyboardButton("📚 Darslar ro'yxati", callback_data="lessons")]
+                ])
+            )
+            return
+
+        status = "✅ *Tugatilgan!*" if lid in done else "🔓 *Navbatdagi dars (Qolgan joyingiz)*"
+        text = (
+            f"▶️ *Darsni davom ettirish*\n\n"
+            f"{les.get('emoji','📘')} *{les_num}. {les.get('title',lid)}*\n"
+            f"📗 Daraja: *{les.get('level','A1')}*\n\n"
+            f"📚 So'zlar: *{len(les.get('vocab',[]))} ta* (Ovozli)\n"
+            f"🧪 Testlar: *{len(les.get('exercises',[]))} ta*\n"
+            f"⭐ Mukofot: *+{len(les.get('exercises',[]))*10} XP*\n\n"
+            f"{status}\n\n"
+            "📖 Darsni boshlash uchun quyidagi tugmani bosing:"
+        )
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb_lesson_detail(lid, uid))
+
+    # ── Darslarni boshidan boshlash ─────────────────
+    elif d == "restart_lessons":
+        first_lid = LESSON_ORDER[0]
+        les = lesson(first_lid)
+        done_count = len(done_lessons(uid))
+        text = (
+            "🔄 *Darslarni boshidan boshlash*\n\n"
+            f"Hozirgacha o'zlashtirilgan darslar: *{done_count}/{len(LESSON_ORDER)} ta*.\n\n"
+            f"Kursni 1-darsdan (*{les.get('emoji','👋')} 1. {les.get('title')}*) qayta boshlash uchun quyidagilardan birini tanlang:\n\n"
+            "• **1-darsga o'tish** — to'plangan XP va natijalaringiz saqlanadi, shunchaki 1-dars ochiladi.\n"
+            "• **Progressni tozalab 0 dan boshlash** — barcha o'tilgan darslar qulflanadi va kurs to'liq yangidan boshlanadi."
+        )
+        await q.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"▶️ 1-darsga o'tish ({les.get('title')})", callback_data=f"lesson:{first_lid}")],
+                [InlineKeyboardButton("🗑 Progressni tozalash va 0 dan boshlash", callback_data="confirm_reset_progress")],
+                [InlineKeyboardButton("◀️ Bekor qilish", callback_data="lessons")],
+            ])
+        )
+
+    # ── Progressni tozalash tasdig'i ────────────────
+    elif d == "confirm_reset_progress":
+        db("DELETE FROM progress WHERE user_id=?", (uid,))
+        db("DELETE FROM sessions WHERE user_id=?", (uid,))
+        first_lid = LESSON_ORDER[0]
+        les = lesson(first_lid)
+        text = (
+            "✅ *Progress muvaffaqiyatli tozalandi!*\n\n"
+            f"Kurs to'liq yangidan boshlandi. Endi 1-dars (*1. {les.get('title')}*) dan o'rganishni boshlashingiz mumkin! 🚀"
+        )
+        await q.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"▶️ 1. {les.get('title')} darsini boshlash", callback_data=f"lesson:{first_lid}")],
+                [InlineKeyboardButton("📚 Darslar ro'yxati", callback_data="lessons")],
+                [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+            ])
+        )
+
     # ── Darslar (daraja tanlash) ─────────────────────
     elif d == "lessons":
         text = "📚 *Darslar ro'yxati*\n\nO'rganmoqchi bo'lgan darajangizni tanlang:"
@@ -477,8 +582,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Agar Premium talab qilinsa
         if reason == "premium_required":
+            les_num = LESSON_ORDER.index(lid) + 1 if lid in LESSON_ORDER else ""
+            num_prefix = f"{les_num}. " if les_num else ""
             text = (
-                "🔒 *Ushbu dars faqat Premium obunachilar uchun!*\n\n"
+                f"🔒 *{num_prefix}{les.get('title', lid)} — Ushbu dars faqat Premium obunachilar uchun!*\n\n"
                 "🎉 Siz dastlabki 5 ta bepul darsni ko'rib chiqdingiz.\n"
                 "Kursni to'liq davom ettirish va barcha 40+ darslar, "
                 "jonli audio talaffuz hamda testlarga ega bo'lish uchun Premium obunani faollashtiring!\n\n"
@@ -501,14 +608,15 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if reason == "prev_not_done":
             idx = LESSON_ORDER.index(lid)
             prev = lesson(LESSON_ORDER[idx - 1])
+            prev_num = idx
             await q.edit_message_text(
                 f"🔒 *Bu dars hali qulfli!*\n\n"
                 f"Avval bu darsni tugatib keling:\n"
-                f"*{prev.get('emoji','')} {prev.get('title','')}* 📚",
+                f"*{prev.get('emoji','')} {prev_num}. {prev.get('title','')}* 📚",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(
-                        f"▶️ {prev.get('emoji','')} {prev.get('title','')}",
+                        f"▶️ {prev.get('emoji','')} {prev_num}. {prev.get('title','')}",
                         callback_data=f"lesson:{LESSON_ORDER[idx-1]}"
                     )],
                     [InlineKeyboardButton("◀️ Orqaga", callback_data="lessons")]
@@ -516,10 +624,12 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        les_num = LESSON_ORDER.index(lid) + 1 if lid in LESSON_ORDER else ""
+        num_prefix = f"{les_num}. " if les_num else ""
         done = done_lessons(uid)
         status = "✅ *Tugatilgan!*" if lid in done else "🔓 Boshlashga tayyor"
         text = (
-            f"{les.get('emoji','📘')} *{les.get('title',lid)}*\n"
+            f"{les.get('emoji','📘')} *{num_prefix}{les.get('title',lid)}*\n"
             f"📗 Daraja: *{les.get('level','A1')}*\n\n"
             f"📚 So'zlar: *{len(les.get('vocab',[]))} ta* (Ovozli)\n"
             f"🧪 Testlar: *{len(les.get('exercises',[]))} ta*\n"
@@ -647,8 +757,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rows = []
         for lid in ids:
             les = lesson(lid)
+            les_num = LESSON_ORDER.index(lid) + 1 if lid in LESSON_ORDER else ""
+            num_prefix = f"{les_num}. " if les_num else ""
             rows.append([InlineKeyboardButton(
-                f"{les.get('emoji','')} {les.get('title',lid)}",
+                f"{les.get('emoji','')} {num_prefix}{les.get('title',lid)}",
                 callback_data=f"vocab:{lid}"
             )])
         rows.append([InlineKeyboardButton("◀️ Orqaga", callback_data="vocab_menu")])
@@ -948,7 +1060,8 @@ async def daily_reminder(ctx: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📚 Darsni boshlash", callback_data="lessons")]
+                    [InlineKeyboardButton("▶️ Qolgan joyidan davom ettirish", callback_data="continue_lesson")],
+                    [InlineKeyboardButton("📚 Darslar ro'yxati", callback_data="lessons")]
                 ])
             )
         except Exception as e:
@@ -957,6 +1070,54 @@ async def daily_reminder(ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════
 # BUYRUQLAR
 # ═══════════════════════════════════════════
+async def cmd_davom(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    ensure_user(uid, update.effective_user.first_name)
+    lid = get_continue_lesson(uid)
+    les = lesson(lid)
+    les_num = LESSON_ORDER.index(lid) + 1 if lid in LESSON_ORDER else 1
+    done = done_lessons(uid)
+
+    if len(done) == len(LESSON_ORDER):
+        await update.message.reply_text(
+            "🎉 *Tabriklaymiz! Siz barcha 40 ta darsni muvaffaqiyatli tugatgansiz!*\n\n"
+            "Darslarni boshidan qayta boshlashingiz yoki istalgan darsni takrorlashingiz mumkin.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Darslarni boshidan boshlash", callback_data="restart_lessons")],
+                [InlineKeyboardButton("📚 Darslar ro'yxati", callback_data="lessons")]
+            ])
+        )
+        return
+
+    ok, reason = can_access_lesson(uid, lid)
+    if reason == "premium_required":
+        await update.message.reply_text(
+            f"🔒 *Navbatdagi dars:* *{les_num}. {les.get('title', lid)}*\n\n"
+            "Ushbu dars faqat **Premium** obunachilar uchun ochiq!\n\n"
+            "Darslarni to'xtovsiz davom ettirish va barcha 40+ darslarni ochish uchun "
+            "Premium obunani faollashtiring.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💎 Premium obunani olish", callback_data="premium_menu")],
+                [InlineKeyboardButton("📚 Barcha darslar", callback_data="lessons")]
+            ])
+        )
+        return
+
+    status = "✅ *Tugatilgan!*" if lid in done else "🔓 *Navbatdagi dars (Qolgan joyingiz)*"
+    text = (
+        f"▶️ *Qolgan joyingizdan davom eting!*\n\n"
+        f"{les.get('emoji','📘')} *{les_num}. {les.get('title',lid)}*\n"
+        f"📗 Daraja: *{les.get('level','A1')}*\n\n"
+        f"📚 So'zlar: *{len(les.get('vocab',[]))} ta* (Ovozli)\n"
+        f"🧪 Testlar: *{len(les.get('exercises',[]))} ta*\n"
+        f"⭐ Mukofot: *+{len(les.get('exercises',[]))*10} XP*\n\n"
+        f"{status}\n\n"
+        "Quyidagi tugmalardan birini tanlang:"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb_lesson_detail(lid, uid))
+
 async def cmd_darslar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     ensure_user(uid, update.effective_user.first_name)
@@ -1099,6 +1260,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("davom",    cmd_davom))
     app.add_handler(CommandHandler("darslar",  cmd_darslar))
     app.add_handler(CommandHandler("progress", cmd_progress))
     app.add_handler(CommandHandler("lugat",    cmd_lugat))
@@ -1121,6 +1283,7 @@ def main():
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("start",    "🦉 Bosh menyu"),
+            BotCommand("davom",    "▶️ Darsni davom ettirish"),
             BotCommand("darslar",  "📚 Darslar"),
             BotCommand("progress", "📊 Progressim"),
             BotCommand("lugat",    "📖 Lug'at"),
