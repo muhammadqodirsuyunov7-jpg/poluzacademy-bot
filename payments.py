@@ -76,6 +76,9 @@ def init_payment_db():
             created_at    TEXT
         );
     """)
+    # Eski demo/test ma'lumotlarini tozalash
+    con.execute("DELETE FROM payments WHERE payment_id LIKE 'test_%'")
+    con.execute("DELETE FROM premium WHERE payment_id LIKE 'test_%'")
     con.commit()
     con.close()
 
