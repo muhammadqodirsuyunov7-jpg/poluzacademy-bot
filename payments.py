@@ -51,6 +51,14 @@ BEPUL_DARSLAR = ["a1_l01", "a1_l02", "a1_l03", "a1_l04", "a1_l05"]
 
 DB_PATH = "polyakcha.db"
 
+UZCARD_NUMBER = os.environ.get("UZCARD_NUMBER", "8600 5304 1234 5678")
+UZCARD_HOLDER = os.environ.get("UZCARD_HOLDER", "PolUzAcademy / Muhammadqodir S.")
+UZS_PRICES = {
+    "oylik":  "85 000 so'm (24.99 zł)",
+    "3oylik": "195 000 so'm (59.99 zł)",
+    "yillik": "590 000 so'm (179.99 zł)",
+}
+
 # ═══════════════════════════════════════════
 # BAZA BILAN ISHLASH
 # ═══════════════════════════════════════════
@@ -73,6 +81,16 @@ def init_payment_db():
             amount        INTEGER,
             payment_id    TEXT,
             status        TEXT,
+            created_at    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS manual_payments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER,
+            user_name     TEXT,
+            plan          TEXT,
+            receipt_file_id TEXT,
+            amount        INTEGER,
+            status        TEXT DEFAULT 'pending',
             created_at    TEXT
         );
     """)
@@ -180,6 +198,7 @@ def kb_premium_menu(user_id: int):
             [InlineKeyboardButton("💳 1 Oylik uzaytirish (24.99 zł)", callback_data="buy_oylik")],
             [InlineKeyboardButton("⭐ 3 Oylik uzaytirish (59.99 zł)", callback_data="buy_3oylik")],
             [InlineKeyboardButton("👑 1 Yillik uzaytirish (179.99 zł)", callback_data="buy_yillik")],
+            [InlineKeyboardButton("🇺🇿 Uzcard / Humo yoki Chek orqali", callback_data="manual_pay_menu")],
             [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")],
         ])
     else:
@@ -187,6 +206,7 @@ def kb_premium_menu(user_id: int):
             [InlineKeyboardButton("💳 1 Oylik — 24.99 zł", callback_data="buy_oylik")],
             [InlineKeyboardButton("⭐ 3 Oylik — 59.99 zł (20% tejash)", callback_data="buy_3oylik")],
             [InlineKeyboardButton("👑 1 Yillik — 179.99 zł (40% tejash)", callback_data="buy_yillik")],
+            [InlineKeyboardButton("🇺🇿 Uzcard / Humo yoki Chek orqali", callback_data="manual_pay_menu")],
             [InlineKeyboardButton("🎁 Promo kod kiritish", callback_data="promo_code")],
             [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")],
         ])
@@ -369,3 +389,230 @@ async def payment_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer(f"✅ Premium faol. Qolgan vaqt: {days_left} kun", show_alert=True)
     elif d == "promo_code":
         await handle_promo(update, ctx)
+    elif d == "manual_pay_menu":
+        await show_manual_pay_menu(update, ctx)
+    elif d.startswith("mpay_approve:"):
+        _, pid_s, plan = d.split(":")
+        await admin_confirm_manual_pay(update, ctx, int(pid_s), plan)
+    elif d.startswith("mpay_reject:"):
+        _, pid_s = d.split(":")
+        await admin_reject_manual_pay(update, ctx, int(pid_s))
+
+# ═══════════════════════════════════════════
+# QO'LDA (MANUAL) TO'LOV VA CHEK TEKSHIRISH
+# ═══════════════════════════════════════════
+async def show_manual_pay_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    ctx.user_data["waiting_receipt"] = True
+    text = (
+        "🇺🇿 *Uzcard / Humo yoki Chek orqali to'lash*\n\n"
+        "O'zbekiston bank kartalari orqali to'lov qilish uchun quyidagi kartaga pul o'tkazing:\n\n"
+        f"💳 Karta raqami: `{UZCARD_NUMBER}`\n"
+        f"👤 Qabul qiluvchi: *{UZCARD_HOLDER}*\n\n"
+        "💰 *Tariflar narxi (so'mda):*\n"
+        f"• 💳 **1 Oylik:** `{UZS_PRICES['oylik']}`\n"
+        f"• ⭐ **3 Oylik:** `{UZS_PRICES['3oylik']}`\n"
+        f"• 👑 **1 Yillik:** `{UZS_PRICES['yillik']}`\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📸 *To'lovdan so'ng:*\n"
+        "To'lov kvitansiyasi (chek) skrinshotini **to'g'ridan-to'g'ri ushbu botga rasm ko'rinishida yuboring!**\n"
+        "Adminlarimiz chekni tekshirib, 15-30 daqiqada Premium obunangizni yoqib berishadi."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀️ Orqaga", callback_data="premium_menu")]
+    ])
+    if q:
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+async def handle_receipt_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE, admin_ids: list):
+    """Foydalanuvchi yuborgan to'lov chekini qabul qilib adminlarga yuboradi."""
+    if not ctx.user_data.get("waiting_receipt"):
+        return False
+
+    ctx.user_data["waiting_receipt"] = False
+    u = update.effective_user
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    now = datetime.now().isoformat()
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+        INSERT INTO manual_payments (user_id, user_name, plan, receipt_file_id, amount, status, created_at)
+        VALUES (?, ?, 'kutilmoqda', ?, 0, 'pending', ?)
+    """, (u.id, u.first_name, file_id, now))
+    pay_id = cur.lastrowid
+    con.commit()
+    con.close()
+
+    await update.message.reply_text(
+        "✅ *To'lov cheki qabul qilindi!*\n\n"
+        "Chekingiz adminlarimizga yuborildi. 15-30 daqiqa ichida tekshirilib, "
+        "Premium obunangiz avtomatik ravishda faollashtiriladi. Rahmat! 🦉",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+        ])
+    )
+
+    admin_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ 1 Oylik (24.99 zł)", callback_data=f"mpay_approve:{pay_id}:oylik"),
+         InlineKeyboardButton("✅ 3 Oylik (59.99 zł)", callback_data=f"mpay_approve:{pay_id}:3oylik")],
+        [InlineKeyboardButton("👑 1 Yillik (179.99 zł)", callback_data=f"mpay_approve:{pay_id}:yillik")],
+        [InlineKeyboardButton("❌ Rad etish", callback_data=f"mpay_reject:{pay_id}")]
+    ])
+
+    admin_text = (
+        "💳 *Yangi to'lov cheki keldi!*\n\n"
+        f"👤 Foydalanuvchi: *{u.first_name}*\n"
+        f"🆔 User ID: `{u.id}`\n"
+        f"📝 To'lov ID: `#{pay_id}`\n"
+        f"📅 Vaqt: `{datetime.now().strftime('%d.%m.%Y %H:%M')}`\n\n"
+        "To'lovni tasdiqlash uchun tegishli tarifni tanlang:"
+    )
+
+    for aid in admin_ids:
+        try:
+            await ctx.bot.send_photo(
+                chat_id=aid,
+                photo=file_id,
+                caption=admin_text,
+                parse_mode="Markdown",
+                reply_markup=admin_kb
+            )
+        except Exception as e:
+            logger.warning(f"Adminga chek yuborishda xatolik ({aid}): {e}")
+
+    return True
+
+async def admin_confirm_manual_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pay_id: int, plan: str):
+    q = update.callback_query
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    row = cur.execute("SELECT * FROM manual_payments WHERE id=?", (pay_id,)).fetchone()
+    if not row:
+        await q.answer("To'lov topilmadi!", show_alert=True)
+        con.close()
+        return
+
+    if row["status"] != "pending":
+        await q.answer("Bu to'lov allaqachon ko'rib chiqilgan!", show_alert=True)
+        con.close()
+        return
+
+    uid = row["user_id"]
+    con.execute("UPDATE manual_payments SET status='approved', plan=? WHERE id=?", (plan, pay_id))
+    con.commit()
+    con.close()
+
+    exp = activate_premium(uid, plan, f"manual_{pay_id}", NARXLAR.get(plan, {}).get("narx", 2499))
+
+    await q.edit_message_caption(
+        caption=f"✅ *TO'LOV TASDIQLANDI!*\nTarif: *{plan.capitalize()}*\nUser ID: `{uid}`\nTugash sanasi: *{exp.strftime('%d.%m.%Y')}*",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await ctx.bot.send_message(
+            chat_id=uid,
+            text=(
+                "🎉 *Xushxabar! To'lovingiz tasdiqlandi!*\n\n"
+                f"💎 Sizga *{plan.capitalize()}* Premium obunasi muvaffaqiyatli faollashtirildi.\n"
+                f"📅 Amal qilish muddati: *{exp.strftime('%d.%m.%Y')}* gacha.\n\n"
+                "Endi barcha darslar, audio talaffuz va testlar siz uchun ochiq! Muvaffaqiyat tilaymiz! 🚀"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📚 Darslarni boshlash", callback_data="lessons")]
+            ])
+        )
+    except Exception as e:
+        logger.warning(f"Foydalanuvchiga xabar yuborishda xatolik ({uid}): {e}")
+
+async def admin_reject_manual_pay(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pay_id: int):
+    q = update.callback_query
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    row = cur.execute("SELECT * FROM manual_payments WHERE id=?", (pay_id,)).fetchone()
+    if not row:
+        await q.answer("To'lov topilmadi!", show_alert=True)
+        con.close()
+        return
+
+    uid = row["user_id"]
+    con.execute("UPDATE manual_payments SET status='rejected' WHERE id=?", (pay_id,))
+    con.commit()
+    con.close()
+
+    await q.edit_message_caption(
+        caption=f"❌ *TO'LOV RAD ETILDI!*\nUser ID: `{uid}`\nTo'lov ID: `#{pay_id}`",
+        parse_mode="Markdown"
+    )
+
+    try:
+        await ctx.bot.send_message(
+            chat_id=uid,
+            text=(
+                "⚠️ *To'lov cheki tasdiqlanmadi.*\n\n"
+                "Yuborilgan to'lov cheki bo'yicha mablag' hisobga tushmagan yoki ma'lumotlar to'liq emas.\n"
+                "Iltimos, qayta to'lov qilib chekni yuboring yoki savol bo'lsa adminga murojaat qiling."
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Qayta to'lash", callback_data="manual_pay_menu")]
+            ])
+        )
+    except Exception as e:
+        logger.warning(f"Foydalanuvchiga xabar yuborishda xatolik ({uid}): {e}")
+
+# ═══════════════════════════════════════════
+# REFERAL TIZIMI
+# ═══════════════════════════════════════════
+async def process_referral_reward(inviter_id: int, new_user_id: int, new_user_name: str, bot):
+    """Do'stini taklif qilgan foydalanuvchini mukofotlaydi."""
+    if inviter_id == new_user_id:
+        return
+
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    
+    # Inviter mavjudligini tekshirish
+    inv_user = cur.execute("SELECT * FROM users WHERE user_id=?", (inviter_id,)).fetchone()
+    if not inv_user:
+        con.close()
+        return
+
+    cur_count = (inv_user["invited_count"] or 0) + 1
+    new_xp = (inv_user["xp"] or 0) + 50  # Har bir taklif uchun +50 XP
+
+    cur.execute("UPDATE users SET invited_count=?, xp=? WHERE user_id=?", (cur_count, new_xp, inviter_id))
+    cur.execute("UPDATE users SET referrer_id=? WHERE user_id=?", (inviter_id, new_user_id))
+    con.commit()
+    con.close()
+
+    bonus_msg = f"⭐ Sizga **+50 XP** berildi! (Jami takliflar: {cur_count} ta)\n"
+    # Bosqichli mukofotlar:
+    if cur_count == 3:
+        exp = activate_premium(inviter_id, "ref_3", f"ref_reward_3_{inviter_id}", 0, days=7)
+        bonus_msg += f"\n🎁 *TABRIKLAYMIZ!* 3 ta do'st taklif qilganingiz uchun sizga *7 kunlik bepul Premium* berildi! (Tugash sanasi: {exp.strftime('%d.%m.%Y')})"
+    elif cur_count == 10:
+        exp = activate_premium(inviter_id, "ref_10", f"ref_reward_10_{inviter_id}", 0, days=30)
+        bonus_msg += f"\n👑 *SUPER MUKOFOT!* 10 ta do'st taklif qilganingiz uchun sizga *30 kunlik bepul Premium* berildi! (Tugash sanasi: {exp.strftime('%d.%m.%Y')})"
+
+    try:
+        await bot.send_message(
+            chat_id=inviter_id,
+            text=(
+                f"👥 *Yangi do'stingiz botga qo'shildi!*\n\n"
+                f"Sizning taklif havolangiz orqali *{new_user_name}* ro'yxatdan o'tdi.\n"
+                f"{bonus_msg}"
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.warning(f"Referal xabarnoma yuborishda xatolik ({inviter_id}): {e}")

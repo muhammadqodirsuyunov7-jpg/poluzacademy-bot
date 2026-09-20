@@ -20,7 +20,11 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+import asyncio
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand
+)
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters
@@ -39,6 +43,8 @@ if os.path.exists(env_path):
 
 import payments
 import tts
+import dictionary_service
+import poland_guide
 
 # ═══════════════════════════════════════════
 # SOZLAMALAR
@@ -89,6 +95,7 @@ LEVELS = {
 # ═══════════════════════════════════════════
 def init_db():
     payments.init_payment_db()
+    dictionary_service.init_dict_db()
     con = sqlite3.connect(DB_PATH)
     con.executescript("""
         CREATE TABLE IF NOT EXISTS users (
@@ -99,7 +106,10 @@ def init_db():
             streak    INTEGER DEFAULT 0,
             last_date TEXT,
             reminder  TEXT,
-            created_at TEXT
+            created_at TEXT,
+            referrer_id INTEGER,
+            invited_count INTEGER DEFAULT 0,
+            last_heart_regen TEXT
         );
         CREATE TABLE IF NOT EXISTS progress (
             user_id   INTEGER,
@@ -118,11 +128,17 @@ def init_db():
             xp_earned INTEGER DEFAULT 0
         );
     """)
-    # Avtomatik migratsiya: agar users jadvalida created_at ustuni bo'lmasa, qo'shish
+    # Avtomatik migratsiya
     cur = con.cursor()
     user_cols = [c[1] for c in cur.execute("PRAGMA table_info(users)").fetchall()]
     if "created_at" not in user_cols:
         cur.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+    if "referrer_id" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN referrer_id INTEGER")
+    if "invited_count" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN invited_count INTEGER DEFAULT 0")
+    if "last_heart_regen" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN last_heart_regen TEXT")
     con.commit()
     con.close()
 
@@ -140,13 +156,80 @@ def db(query, args=(), fetch=None):
     con.close()
     return result
 
+def check_heart_regen(u: dict) -> dict:
+    """Bepul foydalanuvchining yuraklarini har 2 soatda +1 tadan tiklaydi (maksimal 5 gacha)."""
+    if not u or payments.is_premium(u.get("user_id")):
+        return u
+    hearts = u.get("hearts", 5)
+    if hearts is None:
+        hearts = 5
+    if hearts >= 5:
+        return u
+
+    last_regen_str = u.get("last_heart_regen")
+    now = datetime.now()
+    if not last_regen_str:
+        now_iso = now.isoformat()
+        upd_user(u["user_id"], last_heart_regen=now_iso)
+        u["last_heart_regen"] = now_iso
+        return u
+
+    try:
+        last_regen = datetime.fromisoformat(last_regen_str)
+        diff_hours = (now - last_regen).total_seconds() / 3600.0
+        if diff_hours >= 2.0:
+            hearts_to_add = int(diff_hours // 2)
+            new_hearts = min(5, hearts + hearts_to_add)
+            new_last_regen = last_regen + timedelta(hours=hearts_to_add * 2)
+            upd_user(u["user_id"], hearts=new_hearts, last_heart_regen=new_last_regen.isoformat())
+            u["hearts"] = new_hearts
+            u["last_heart_regen"] = new_last_regen.isoformat()
+    except Exception as e:
+        logger.warning(f"Yurak tiklashda xatolik: {e}")
+
+    return u
+
+def heart_status_text(u: dict) -> str:
+    """Yuraklar holati va tiklanish vaqtini matn ko'rinishida beradi."""
+    if not u:
+        return "❤️❤️❤️❤️❤️ (5/5)"
+    if payments.is_premium(u.get("user_id")):
+        return "❤️ Cheksiz (💎 Premium)"
+    h = u.get("hearts", 5)
+    if h is None:
+        h = 5
+    if h >= 5:
+        return f"{'❤️'*5} (5/5 To'liq)"
+    last_str = u.get("last_heart_regen")
+    time_left_txt = ""
+    if last_str:
+        try:
+            last = datetime.fromisoformat(last_str)
+            next_regen = last + timedelta(hours=2)
+            rem_sec = max(0, int((next_regen - datetime.now()).total_seconds()))
+            rem_min = rem_sec // 60
+            time_left_txt = f" (Keyingisi: ~{rem_min} daqiqada)"
+        except Exception:
+            pass
+    return f"{'❤️'*h}{'🖤'*(5-h)} ({h}/5){time_left_txt}"
+
+def get_leaderboard(current_uid: int):
+    """Top 10 o'quvchilar va joriy foydalanuvchining reytingdagi o'rnini qaytaradi."""
+    rows = db("SELECT user_id, name, xp, streak FROM users ORDER BY xp DESC LIMIT 10", fetch="all")
+    user_row = db("SELECT COUNT(*) + 1 as rank FROM users WHERE xp > (SELECT COALESCE(xp, 0) FROM users WHERE user_id=?)", (current_uid,), fetch="one")
+    user_rank = user_row["rank"] if user_row else 1
+    return rows, user_rank
+
 def get_user(uid):
     row = db("SELECT * FROM users WHERE user_id=?", (uid,), "one")
-    return dict(row) if row else None
+    if not row:
+        return None
+    u = dict(row)
+    return check_heart_regen(u)
 
 def ensure_user(uid, name):
     now = datetime.now().isoformat()
-    db("INSERT OR IGNORE INTO users (user_id, name, created_at) VALUES (?, ?, ?)", (uid, name, now))
+    db("INSERT OR IGNORE INTO users (user_id, name, created_at, last_heart_regen) VALUES (?, ?, ?, ?)", (uid, name, now, now))
 
 def upd_user(uid, **kw):
     sets = ", ".join(f"{k}=?" for k in kw)
@@ -240,6 +323,14 @@ def get_continue_lesson(uid):
 # ═══════════════════════════════════════════
 # KLAVIATURALAR
 # ═══════════════════════════════════════════
+def kb_reply_main():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("▶️ Davom ettirish"), KeyboardButton("📚 Darslar")],
+        [KeyboardButton("📖 Lug'at & Qidiruv"), KeyboardButton("🏆 Reyting")],
+        [KeyboardButton("🇵🇱 Polsha hayoti"), KeyboardButton("👤 Profilim")],
+        [KeyboardButton("💎 Premium"), KeyboardButton("👥 Do'stlarni taklif qilish")],
+    ], resize_keyboard=True)
+
 def kb_main(uid: int = None):
     prem_label = "💎 Premium Obuna"
     if uid and payments.is_premium(uid):
@@ -249,12 +340,15 @@ def kb_main(uid: int = None):
         [InlineKeyboardButton("▶️ Qolgan joyidan davom ettirish", callback_data="continue_lesson")],
         [InlineKeyboardButton("📚 Darslar",    callback_data="lessons"),
          InlineKeyboardButton("🔄 Boshidan boshlash", callback_data="restart_lessons")],
-        [InlineKeyboardButton("📖 Lug'at",     callback_data="vocab_menu"),
+        [InlineKeyboardButton("📖 Lug'at & Qidiruv", callback_data="vocab_menu"),
          InlineKeyboardButton("📊 Progressim", callback_data="progress")],
-        [InlineKeyboardButton("⏰ Eslatma",    callback_data="reminder_menu"),
+        [InlineKeyboardButton("🏆 Peshqadamlar Reytingi", callback_data="leaderboard"),
+         InlineKeyboardButton("🇵🇱 Polsha hayoti", callback_data="poland_guide")],
+        [InlineKeyboardButton("👥 Do'stlarni taklif qilish", callback_data="referral_info"),
          InlineKeyboardButton(prem_label,      callback_data="premium_menu")],
-        [InlineKeyboardButton("ℹ️ Kurs haqida", callback_data="about"),
-         InlineKeyboardButton("❓ Yordam",      callback_data="help")],
+        [InlineKeyboardButton("⏰ Eslatma",    callback_data="reminder_menu"),
+         InlineKeyboardButton("ℹ️ Kurs haqida", callback_data="about")],
+        [InlineKeyboardButton("❓ Yordam",      callback_data="help")],
     ])
 
 def kb_lessons(uid):
@@ -307,6 +401,7 @@ def kb_lesson_detail(lid, uid):
     rows = [
         [InlineKeyboardButton("🔊 Lug'atni eshitish", callback_data=f"audio_vocab:{lid}"),
          InlineKeyboardButton("📖 Lug'at", callback_data=f"vocab:{lid}")],
+        [InlineKeyboardButton("🗂 Flashcard orqali yodlash", callback_data=f"flashcards:{lid}:0")],
         [InlineKeyboardButton("📝 Grammatika", callback_data=f"grammar:{lid}"),
          InlineKeyboardButton("💬 Dialog", callback_data=f"dialog:{lid}")],
         [InlineKeyboardButton("▶️ Darsni boshlash", callback_data=f"go:{lid}")],
@@ -344,10 +439,21 @@ def kb_vocab_menu():
 # ═══════════════════════════════════════════
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
+    args = ctx.args
+
+    # Do'stni taklif qilish havolasi (/start ref_123456)
+    if args and len(args) > 0 and args[0].startswith("ref_"):
+        try:
+            inv_id = int(args[0].replace("ref_", ""))
+            existing = db("SELECT * FROM users WHERE user_id=?", (u.id,), "one")
+            if not existing and inv_id != u.id:
+                await payments.process_referral_reward(inv_id, u.id, u.first_name, ctx.bot)
+        except Exception as e:
+            logger.warning(f"Referal xatoligi: {e}")
+
     ensure_user(u.id, u.first_name)
 
     # To'lovdan qaytgandagi linklarni tekshirish (/start success_oylik_12345 yoki simpay_oylik)
-    args = ctx.args
     if args and len(args) > 0:
         arg = args[0]
         if arg.startswith("success_") or arg.startswith("simpay_"):
@@ -385,10 +491,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🎮 *O'yin va O'rganish tizimi:*\n"
         "🔊 *Ovozli talaffuz* — so'z va dialoglarni tinglang\n"
         "⭐ *XP ballar* — har to'g'ri javob uchun +10 ball\n"
-        "❤️ *Yuraklar* — xatolar hisoblanadi\n"
+        "❤️ *Yuraklar* — xatolar hisoblanadi (har 2 soatda tiklanadi)\n"
         "🔥 *Streak* — ketma-ket o'rganish kunlari\n\n"
         "⬇️ *Quyidagi tugmani bosing va boshlang!*"
     )
+    # Doimiy pastki menyuni ochish va asosiy kartani chiqarish
+    await update.message.reply_text("👋 Boshqaruv tugmalari ekranning pastki qismida faollashdi.", reply_markup=kb_reply_main())
     await update.message.reply_text(
         text, parse_mode="Markdown", reply_markup=kb_main(u.id)
     )
@@ -403,7 +511,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
 
     # ── To'lov bilan bog'liq callbacklar ────────────
-    if d in ["premium_menu", "buy_oylik", "buy_3oylik", "buy_yillik", "premium_renew", "premium_info", "promo_code"]:
+    if d in ["premium_menu", "buy_oylik", "buy_3oylik", "buy_yillik", "premium_renew", "premium_info", "promo_code", "manual_pay_menu"] or d.startswith("mpay_"):
         await payments.payment_callback(update, ctx)
         return
 
@@ -413,13 +521,14 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lvl_p = level_progress(uid)
         is_prem = payments.is_premium(uid)
         status_txt = "💎 Premium Obunachi ✅" if is_prem else "🆓 Bepul versiya"
+        h_txt = heart_status_text(u)
 
         text = (
             f"🦉 *PolUzAcademy — Bosh Menyu*\n\n"
             f"👤 *{q.from_user.first_name}* ({status_txt})\n\n"
             f"🔥 Streak: *{u.get('streak',0)} kun*\n"
             f"⭐ XP: *{u.get('xp',0)}*\n"
-            f"❤️ Yuraklar: *{u.get('hearts',5)}/5*\n\n"
+            f"❤️ Yuraklar: *{h_txt}*\n\n"
             f"📗 A1.1: *{lvl_p.get('A1.1',0)}/10* dars\n"
             f"📘 A1.2: *{lvl_p.get('A1.2',0)}/10* dars\n"
             f"📙 A2.1: *{lvl_p.get('A2.1',0)}/10* dars\n"
@@ -845,6 +954,12 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 lives -= 1
             wrng_cnt += 1
             result = f"❌ *Xato!*  To'g'ri javob: *{ex['opts'][correct]}*"
+            try:
+                dictionary_service.record_mistake(
+                    uid, lid, ex['q'], ex['opts'], correct, ex['opts'][choice]
+                )
+            except Exception as e:
+                logger.warning(f"Xatoni yozishda muammo: {e}")
 
         next_idx = ex_idx + 1
         upd_ses(uid, ex_idx=next_idx, lives=lives,
@@ -867,7 +982,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if lives <= 0 and not is_prem:
             u     = get_user(uid)
             new_h = max(0, (u.get("hearts") or 5) - 1)
-            upd_user(uid, hearts=new_h)
+            upd_user(uid, hearts=new_h, last_heart_regen=datetime.now().isoformat())
             final = (
                 f"{res_txt}\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -934,14 +1049,19 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         done  = done_lessons(uid)
         lvl_p = level_progress(uid)
         is_prem = payments.is_premium(uid)
+        h_txt = heart_status_text(u)
+        _, user_rank = get_leaderboard(uid)
+        mistakes_cnt = dictionary_service.get_user_mistakes_count(uid)
 
         text = (
             f"📊 *Mening Progressim*\n\n"
             f"👤 O'quvchi: *{q.from_user.first_name}*\n"
             f"💎 Holat: *{'Premium ✅' if is_prem else 'Bepul 🆓'}*\n"
-            f"⭐ Jami XP: *{u.get('xp',0)} ball*\n"
+            f"⭐ Jami XP: *{u.get('xp',0)} ball* (Reyting: *#{user_rank}*)\n"
             f"🔥 Streak: *{u.get('streak',0)} kun ketma-ket*\n"
-            f"❤️ Yuraklar: *{u.get('hearts',5)}/5*\n\n"
+            f"❤️ Yuraklar: *{h_txt}*\n"
+            f"👥 Taklif qilgan do'stlar: *{u.get('invited_count', 0)} ta*\n"
+            f"⚠️ Hal qilinmagan xatolar: *{mistakes_cnt} ta*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📚 *Darajalar bo'yicha progress:*\n"
             f"📗 A1.1: {pbar(lvl_p.get('A1.1',0),10)} {lvl_p.get('A1.1',0)}/10\n"
@@ -950,11 +1070,17 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📕 A2.2: {pbar(lvl_p.get('A2.2',0),10)} {lvl_p.get('A2.2',0)}/10\n\n"
             f"🎯 Jami tugatilgan darslar: *{len(done)}/{len(LESSON_ORDER)}*"
         )
-        await q.edit_message_text(text, parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📚 Darslarga o'tish", callback_data="lessons")],
-                [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
-            ]))
+        prog_buttons = []
+        if mistakes_cnt > 0:
+            prog_buttons.append([InlineKeyboardButton(f"🔁 Xatolar ustida ishlash ({mistakes_cnt} ta)", callback_data="review_mistakes:0")])
+        prog_buttons.append([
+            InlineKeyboardButton("🏆 Reyting", callback_data="leaderboard"),
+            InlineKeyboardButton("👥 Taklif qilish", callback_data="referral_info")
+        ])
+        prog_buttons.append([InlineKeyboardButton("📚 Darslarga o'tish", callback_data="lessons")])
+        prog_buttons.append([InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")])
+
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(prog_buttons))
 
     # ── Eslatma Menyu ───────────────────────────────
     elif d == "reminder_menu":
@@ -1010,7 +1136,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "💎 *To'lov va Premium:*\n"
             "• Dastlabki 5 ta dars — barcha uchun bepul\n"
             "• 6-darsdan boshlab — Premium (Oylik 24.99 zł, 3 oylik 59.99 zł, Yillik 179.99 zł)\n"
-            "• To'lovlar **BLIK** yoki **Karta** orqali avtomatik qabul qilinadi\n\n"
+            "• To'lovlar **BLIK**, **Karta** yoki **Uzcard/Humo** orqali qabul qilinadi\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "📞 *Qo'llab-quvvatlash va Aloqa:*\n"
             "Bot bo'yicha savol yoki takliflaringiz bo'lsa, adminga yozing."
@@ -1020,6 +1146,260 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("💎 Premium obuna", callback_data="premium_menu")],
                 [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
             ]))
+
+    # ── Peshqadamlar Reytingi (Leaderboard) ────────
+    elif d == "leaderboard":
+        rows, user_rank = get_leaderboard(uid)
+        u = get_user(uid) or {}
+        medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+        txt = "🏆 *PolUzAcademy Peshqadamlar Reytingi (TOP-10)*\n\n"
+        for idx, r in enumerate(rows):
+            medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+            name = r["name"] or f"O'quvchi {r['user_id']}"
+            txt += f"{medal} *{name}* — `{r['xp']}` XP (🔥 {r['streak']} kun)\n"
+        txt += (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 Sizning o'rningiz: *#{user_rank}* (`{u.get('xp',0)}` XP)\n\n"
+            "Har kuni darslarni bajaring va peshqadamlar safiga qo'shiling! 🚀"
+        )
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Darslarni davom ettirish", callback_data="continue_lesson")],
+            [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+        ]))
+
+    # ── Do'stlarni taklif qilish (Referral) ────────
+    elif d == "referral_info":
+        bot_me = await ctx.bot.get_me()
+        bot_user = bot_me.username or "PolUzAcademyBot"
+        ref_link = f"https://t.me/{bot_user}?start=ref_{uid}"
+        u = get_user(uid) or {}
+        cnt = u.get("invited_count") or 0
+        txt = (
+            "👥 *Do'stlarni taklif qiling va Bepul Premium yutib oling!*\n\n"
+            f"Sizning shaxsiy taklif havolangiz:\n`{ref_link}`\n\n"
+            f"📊 Siz taklif qilgan do'stlar soni: *{cnt} ta*\n\n"
+            "🎁 *Mukofotlar:*\n"
+            "• Har bir qo'shilgan do'st uchun: *+50 XP* ball ⭐\n"
+            "• 3 ta do'st: *7 kunlik bepul Premium* 💎\n"
+            "• 10 ta do'st: *30 kunlik bepul Premium* 👑\n\n"
+            "Ushbu havolani nusxalab, do'stlaringizga yoki guruhlarga yuboring!"
+        )
+        import urllib.parse
+        share_caption = urllib.parse.quote("Polyak tilini PolUzAcademy boti bilan 0 dan bepul o'rganing! 🦉🇵🇱")
+        share_url = f"https://t.me/share/url?url={ref_link}&text={share_caption}"
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📲 Do'stlarga ulashish (Telegram)", url=share_url)],
+            [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+        ]))
+
+    # ── Polsha hayoti qo'llanmasi ─────────────────
+    elif d == "poland_guide":
+        txt = (
+            "🇵🇱 *Polsha hayoti va Muloqot qo'llanmasi*\n\n"
+            "Polshada yashayotgan va ishlayotgan vatandoshlarimiz uchun eng zarur amaliy qo'llanma:\n"
+            "• 🏛 **Urząd va Karta Pobytu** — arizalar, meldunek, PESEL\n"
+            "• 💼 **Ish joyi** — sklad, zavod, kuryer, qurilish iboralari\n"
+            "• 🚑 **SOS & Elchixona** — tez yordam, dorixona, favqulodda vaziyatlar\n"
+            "• 🚌 **Transport va Do'kon** — chiptalar, shahar muloqoti\n\n"
+            "O'rganmoqchi bo'lgan bo'limingizni tanlang:"
+        )
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=poland_guide.kb_guide_main())
+
+    elif d.startswith("guide:"):
+        sec_id = d.split(":")[1]
+        sec = poland_guide.GUIDE_SECTIONS.get(sec_id)
+        if sec:
+            txt = f"*{sec['title']}*\n_{sec['desc']}_\n\n━━━━━━━━━━━━━━━━━━━━━━\n📚 *Asosiy so'z va iboralar:*\n\n"
+            for pl, ph, uz in sec["terms"]:
+                txt += f"• 🇵🇱 `{pl}`\n    🔊 _{ph}_\n    🇺🇿 {uz}\n\n"
+            if sec.get("dialog"):
+                txt += f"━━━━━━━━━━━━━━━━━━━━━━\n{sec['dialog']}\n\n"
+            if sec.get("embassy_info"):
+                txt += f"━━━━━━━━━━━━━━━━━━━━━━\n{sec['embassy_info']}\n"
+            await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=poland_guide.kb_guide_section(sec_id))
+
+    elif d.startswith("guide_audio:"):
+        sec_id = d.split(":")[1]
+        sec = poland_guide.GUIDE_SECTIONS.get(sec_id)
+        if sec:
+            await q.answer("🔊 Audio tayyorlanmoqda...")
+            words = [p[0] for p in sec["terms"][:12]]
+            clean_diag = ". ".join(words)
+            audio_path = await tts.generate_speech(clean_diag)
+            if audio_path and os.path.exists(audio_path):
+                with open(audio_path, "rb") as af:
+                    await ctx.bot.send_voice(
+                        chat_id=uid,
+                        voice=af,
+                        caption=f"🦉 *{sec['title']}* — Lug'at talaffuzi (Polyakcha)",
+                        parse_mode="Markdown"
+                    )
+            else:
+                await q.answer("Ovoz hosil qilishda xatolik!", show_alert=True)
+
+    # ── Flashcards (Lug'at kartochkalari) ──────────
+    elif d.startswith("flashcards:"):
+        _, lid, idx_s = d.split(":")
+        idx = int(idx_s)
+        les = lesson(lid)
+        vocab = les.get("vocab", [])
+        if not vocab:
+            await q.answer("Lug'at topilmadi!", show_alert=True)
+            return
+
+        if idx >= len(vocab):
+            learned_cnt = dictionary_service.get_lesson_flashcards_progress(uid, lid)
+            txt = (
+                f"🎉 *Ajoyib natija!*\n\n"
+                f"Siz *{les.get('title', lid)}* darsidagi barcha {len(vocab)} ta so'z kartochkalarini ko'rib chiqdingiz!\n"
+                f"✅ O'zlashtirilgan so'zlar: *{learned_cnt}/{len(vocab)} ta*\n\n"
+                "Endi dars testlarini topshirishingiz yoki boshidan takrorlashingiz mumkin."
+            )
+            await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶️ Darsni boshlash", callback_data=f"go:{lid}")],
+                [InlineKeyboardButton("🔁 Kartochkalarni qayta o'qish", callback_data=f"flashcards:{lid}:0")],
+                [InlineKeyboardButton("◀️ Darsga qaytish", callback_data=f"lesson:{lid}")]
+            ]))
+            return
+
+        w = vocab[idx]
+        txt = (
+            f"🗂 *Lug'at Kartochkasi ({idx+1}/{len(vocab)})*\n"
+            f"Dars: *{les.get('title', lid)}*\n\n"
+            f"🇵🇱 So'z: *{w['pl']}*\n"
+            f"🔊 Talaffuz: _{w['ph']}_\n\n"
+            "Tarjimasini bilasizmi? Bilish uchun quyidagi tugmani bosing:"
+        )
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👁 Tarjimasini ko'rish", callback_data=f"fc_reveal:{lid}:{idx}")],
+            [InlineKeyboardButton("⏭ O'tkazib yuborish", callback_data=f"flashcards:{lid}:{idx+1}")],
+            [InlineKeyboardButton("◀️ Darsga qaytish", callback_data=f"lesson:{lid}")]
+        ]))
+
+    elif d.startswith("fc_reveal:"):
+        _, lid, idx_s = d.split(":")
+        idx = int(idx_s)
+        les = lesson(lid)
+        vocab = les.get("vocab", [])
+        if idx >= len(vocab):
+            return
+        w = vocab[idx]
+        txt = (
+            f"🗂 *Lug'at Kartochkasi ({idx+1}/{len(vocab)})*\n"
+            f"Dars: *{les.get('title', lid)}*\n\n"
+            f"🇵🇱 Polyakcha: *{w['pl']}*\n"
+            f"🔊 O'qilishi: _{w['ph']}_\n"
+            f"🇺🇿 Tarjimasi: *{w['uz']}*\n\n"
+            "Ushbu so'zni eslab qoldingizmi?"
+        )
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔊 Talaffuzni eshitish", callback_data=f"tts_word:{w['pl']}")],
+            [InlineKeyboardButton("✅ Yodladim", callback_data=f"fc_learn:{lid}:{idx}:1"),
+             InlineKeyboardButton("🔄 Qaytarish", callback_data=f"fc_learn:{lid}:{idx}:0")],
+            [InlineKeyboardButton("➡️ Keyingi so'z", callback_data=f"flashcards:{lid}:{idx+1}")],
+            [InlineKeyboardButton("◀️ Darsga qaytish", callback_data=f"lesson:{lid}")]
+        ]))
+
+    elif d.startswith("fc_learn:"):
+        _, lid, idx_s, val_s = d.split(":")
+        idx = int(idx_s)
+        learned = (val_s == "1")
+        les = lesson(lid)
+        vocab = les.get("vocab", [])
+        if idx < len(vocab):
+            dictionary_service.mark_card_learned(uid, lid, vocab[idx]["pl"], learned)
+        next_idx = idx + 1
+        q.data = f"flashcards:{lid}:{next_idx}"
+        await on_cb(update, ctx)
+        return
+
+    # ── Xatolar ustida ishlash (Review Mistakes) ──
+    elif d.startswith("review_mistakes:"):
+        mistakes = dictionary_service.get_user_mistakes(uid, limit=10)
+        if not mistakes:
+            await q.edit_message_text(
+                "🎉 *Tabriklaymiz! Sizda hal qilinmagan xatolar yo'q!*\n\n"
+                "Barcha dars testlarini a'lo darajada o'zlashtirgansiz.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📚 Darslarga o'tish", callback_data="lessons")],
+                    [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+                ])
+            )
+            return
+
+        m = mistakes[0]
+        opts = m["opts"]
+        mid = m["id"]
+        txt = (
+            f"🔁 *Xatolar ustida ishlash ({len(mistakes)} ta qoldi)*\n\n"
+            f"{m['question']}\n\n"
+            f"⚠️ Oldingi xato javobingiz: _{m.get('wrong_choice','Noma`lum')}_\n\n"
+            "To'g'ri javobni tanlang:"
+        )
+        letters = ["🅐","🅑","🅒","🅓"]
+        rows = [
+            [InlineKeyboardButton(f"{letters[i]}  {opt}", callback_data=f"ans_mistake:{mid}:{i}")]
+            for i, opt in enumerate(opts)
+        ]
+        rows.append([InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")])
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+
+    elif d.startswith("ans_mistake:"):
+        _, mid_s, ch_s = d.split(":")
+        mid = int(mid_s)
+        choice = int(ch_s)
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        m = cur.execute("SELECT * FROM mistakes WHERE id=?", (mid,)).fetchone()
+        con.close()
+        if not m:
+            await q.answer("Savol topilmadi!", show_alert=True)
+            return
+
+        import json
+        opts = json.loads(m["opts_json"])
+        correct_idx = m["correct_idx"]
+        is_ok = (choice == correct_idx)
+
+        if is_ok:
+            dictionary_service.resolve_mistake(uid, m["question"])
+            u = get_user(uid) or {}
+            upd_user(uid, xp=(u.get("xp",0) + 5))
+            txt = (
+                "✅ *Ajoyib! Xatoni to'g'riladingiz!* (+5 ⭐)\n\n"
+                f"{m['question']}\n\n"
+                f"To'g'ri javob: *{opts[correct_idx]}*"
+            )
+            btn = [InlineKeyboardButton("➡️ Keyingi xato", callback_data="review_mistakes:0")]
+        else:
+            txt = (
+                "❌ *Afsuski, yana noto'g'ri bo'ldi.*\n\n"
+                f"{m['question']}\n\n"
+                f"To'g'ri javob: *{opts[correct_idx]}*\n"
+                "Qaytadan urinib ko'ring!"
+            )
+            btn = [InlineKeyboardButton("🔁 Qaytadan urinish", callback_data="review_mistakes:0")]
+
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            btn,
+            [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+        ]))
+
+    # ── TTS so'z talaffuzi ─────────────────────────
+    elif d.startswith("tts_word:"):
+        word = d[9:]
+        await q.answer("🔊 Talaffuz tayyorlanmoqda...")
+        audio_path = await tts.generate_speech(word)
+        if audio_path and os.path.exists(audio_path):
+            with open(audio_path, "rb") as af:
+                await ctx.bot.send_voice(
+                    chat_id=uid,
+                    voice=af,
+                    caption=f"🇵🇱 *{word}* — Polyakcha talaffuz",
+                    parse_mode="Markdown"
+                )
 
 # ═══════════════════════════════════════════
 # MASHQ KO'RSATISH
@@ -1177,15 +1557,21 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     users_cnt = db("SELECT COUNT(*) as cnt FROM users", (), "one")
     stats = payments.get_payment_stats()
     
+    pending_m = db("SELECT COUNT(*) as cnt FROM manual_payments WHERE status='pending'", (), "one")
+    pending_cnt = pending_m["cnt"] if pending_m else 0
+
     text = (
         "👑 *PolUzAcademy Admin Paneli*\n\n"
         f"👥 Jami foydalanuvchilar: *{users_cnt['cnt'] if users_cnt else 0} ta*\n"
         f"💎 Faol Premium obunachilar: *{stats['active_users']} ta*\n"
         f"💳 Jami to'lovlar soni: *{stats['total_payments_count']} ta*\n"
-        f"💰 Jami tushum: *{stats['total_revenue_pln']:.2f} PLN*\n\n"
-        "⚡️ *Foydalanuvchiga Premium berish:*\n"
-        "`/grant <user_id> <kunlar_soni>`\n"
-        "Masalan: `/grant 123456789 30`"
+        f"💰 Jami tushum: *{stats['total_revenue_pln']:.2f} PLN*\n"
+        f"⏳ Kutilayotgan cheklar: *{pending_cnt} ta*\n\n"
+        "⚡️ *Admin buyruqlari:*\n"
+        "• `/grant <user_id> <kunlar>` — Premium berish\n"
+        "• `/broadcast <matn>` — Barcha foydalanuvchilarga xabar tarqatish\n"
+        "• `/reply <user_id> <matn>` — O'quvchiga bot nomidan javob berish\n"
+        "• `/backup` — Ma'lumotlar bazasini yuklab olish"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -1211,17 +1597,211 @@ async def cmd_grant(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Xatolik: {e}")
 
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return
+    if not ctx.args:
+        await update.message.reply_text("Format: `/broadcast <xabar matni>`\n\nBarcha foydalanuvchilarga xabar yuborish.", parse_mode="Markdown")
+        return
+
+    broadcast_text = " ".join(ctx.args)
+    users = db("SELECT user_id FROM users", fetch="all")
+    if not users:
+        await update.message.reply_text("Foydalanuvchilar topilmadi.")
+        return
+
+    sent = 0
+    failed = 0
+    status_msg = await update.message.reply_text(f"📢 Xabar tarqatilmoqda (Jami: {len(users)})...")
+
+    for u in users:
+        try:
+            await ctx.bot.send_message(
+                chat_id=u["user_id"],
+                text=broadcast_text,
+                parse_mode="Markdown"
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.04)
+
+    await status_msg.edit_text(
+        f"✅ *Xabar tarqatish yakunlandi!*\n\n"
+        f"📨 Yuborildi: *{sent} ta*\n"
+        f"❌ Yetib bormadi (bloklagan): *{failed} ta*",
+        parse_mode="Markdown"
+    )
+
+async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return
+    if os.path.exists(DB_PATH):
+        with open(DB_PATH, "rb") as doc:
+            await update.message.reply_document(
+                document=doc,
+                filename=f"polyakcha_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.db",
+                caption="💾 *PolUzAcademy ma'lumotlar bazasi zaxira nusxasi*",
+                parse_mode="Markdown"
+            )
+    else:
+        await update.message.reply_text("Baza fayli topilmadi.")
+
+async def cmd_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return
+    if len(ctx.args) < 2:
+        await update.message.reply_text("Format: `/reply <user_id> <xabar>`", parse_mode="Markdown")
+        return
+    try:
+        target_uid = int(ctx.args[0])
+        reply_txt = " ".join(ctx.args[1:])
+        await ctx.bot.send_message(
+            chat_id=target_uid,
+            text=f"💬 *PolUzAcademy Adminidan javob:*\n\n{reply_txt}",
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text(f"✅ Xabar `{target_uid}` ga muvaffaqiyatli yetkazildi.")
+    except Exception as e:
+        await update.message.reply_text(f"Xatolik: {e}")
+
+async def cmd_reyting(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    ensure_user(uid, update.effective_user.first_name)
+    rows, user_rank = get_leaderboard(uid)
+    u = get_user(uid) or {}
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    txt = "🏆 *PolUzAcademy Peshqadamlar Reytingi (TOP-10)*\n\n"
+    for idx, r in enumerate(rows):
+        medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+        name = r["name"] or f"O'quvchi {r['user_id']}"
+        txt += f"{medal} *{name}* — `{r['xp']}` XP (🔥 {r['streak']} kun)\n"
+    txt += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Sizning o'rningiz: *#{user_rank}* (`{u.get('xp',0)}` XP)\n\n"
+        "Har kuni darslarni bajaring va peshqadamlar safiga qo'shiling! 🚀"
+    )
+    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Darslarni davom ettirish", callback_data="continue_lesson")],
+        [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+    ]))
+
+async def cmd_guide(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    txt = (
+        "🇵🇱 *Polsha hayoti va Muloqot qo'llanmasi*\n\n"
+        "Polshada yashayotgan va ishlayotgan vatandoshlarimiz uchun eng zarur amaliy qo'llanma:\n"
+        "• 🏛 **Urząd va Karta Pobytu** — arizalar, meldunek, PESEL\n"
+        "• 💼 **Ish joyi** — sklad, zavod, kuryer, qurilish iboralari\n"
+        "• 🚑 **SOS & Elchixona** — tez yordam, dorixona, favqulodda vaziyatlar\n"
+        "• 🚌 **Transport va Do'kon** — chiptalar, shahar muloqoti\n\n"
+        "O'rganmoqchi bo'lgan bo'limingizni tanlang:"
+    )
+    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=poland_guide.kb_guide_main())
+
+async def show_referral_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    ensure_user(uid, update.effective_user.first_name)
+    bot_me = await ctx.bot.get_me()
+    bot_user = bot_me.username or "PolUzAcademyBot"
+    ref_link = f"https://t.me/{bot_user}?start=ref_{uid}"
+    u = get_user(uid) or {}
+    cnt = u.get("invited_count") or 0
+    txt = (
+        "👥 *Do'stlarni taklif qiling va Bepul Premium yutib oling!*\n\n"
+        f"Sizning shaxsiy taklif havolangiz:\n`{ref_link}`\n\n"
+        f"📊 Siz taklif qilgan do'stlar soni: *{cnt} ta*\n\n"
+        "🎁 *Mukofotlar:*\n"
+        "• Har bir do'st uchun: *+50 XP* ball ⭐\n"
+        "• 3 ta do'st: *7 kunlik bepul Premium* 💎\n"
+        "• 10 ta do'st: *30 kunlik bepul Premium* 👑\n\n"
+        "Ushbu havolani nusxalab, do'stlaringizga yoki guruhlarga yuboring!"
+    )
+    import urllib.parse
+    share_caption = urllib.parse.quote("Polyak tilini PolUzAcademy boti bilan 0 dan bepul o'rganing! 🦉🇵🇱")
+    share_url = f"https://t.me/share/url?url={ref_link}&text={share_caption}"
+    await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("📲 Do'stlarga ulashish (Telegram)", url=share_url)],
+        [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
+    ]))
+
+async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Foydalanuvchi yuborgan rasmni (masalan, to'lov cheki) qabul qilish."""
+    handled = await payments.handle_receipt_photo(update, ctx, ADMIN_IDS)
+    if not handled:
+        await update.message.reply_text(
+            "📸 Rasm qabul qilindi. Agar bu to'lov cheki bo'lsa, avval '💎 Premium' bo'limidan 'Uzcard/Humo yoki Chek orqali' tugmasini bosing.",
+            reply_markup=kb_main(update.effective_user.id)
+        )
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Promo kod tekshirish
+    msg_text = update.message.text.strip()
+    uid = update.effective_user.id
+    ensure_user(uid, update.effective_user.first_name)
+
+    # 1. Pastki klaviatura tugmalarini qayta ishlash
+    if msg_text == "▶️ Davom ettirish":
+        await cmd_davom(update, ctx)
+        return
+    elif msg_text == "📚 Darslar":
+        await cmd_darslar(update, ctx)
+        return
+    elif msg_text == "📖 Lug'at & Qidiruv":
+        await cmd_lugat(update, ctx)
+        return
+    elif msg_text == "🏆 Reyting":
+        await cmd_reyting(update, ctx)
+        return
+    elif msg_text == "🇵🇱 Polsha hayoti":
+        await cmd_guide(update, ctx)
+        return
+    elif msg_text == "👤 Profilim":
+        await cmd_progress(update, ctx)
+        return
+    elif msg_text == "💎 Premium":
+        await payments.show_premium(update, ctx)
+        return
+    elif msg_text in ["👥 Do'stlarni taklif qilish", "👥 Taklif qilish"]:
+        await show_referral_msg(update, ctx)
+        return
+
+    # 2. Promo kod tekshirish
     handled = await payments.check_promo_code(update, ctx)
     if handled:
         return
 
+    # 3. Lug'atdan tezkor qidiruv (Pocket search)
+    results = dictionary_service.search_vocab(msg_text, limit=5)
+    if results:
+        res_text = f"🔍 *Lug'atdan topildi:* *'{msg_text}'*\n\n"
+        buttons = []
+        for i, item in enumerate(results, 1):
+            res_text += (
+                f"*{i}.* 🇵🇱 `{item['pl']}`\n"
+                f"    🔊 _{item['ph']}_\n"
+                f"    🇺🇿 {item['uz']}\n"
+                f"    📚 _{item['lesson_title']}_\n\n"
+            )
+            if i <= 3:
+                buttons.append([InlineKeyboardButton(f"🔊 '{item['pl']}' talaffuzi", callback_data=f"tts_word:{item['pl']}")])
+
+        buttons.append([InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")])
+        await update.message.reply_text(
+            res_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    # 4. Agar so'z topilmasa
     await update.message.reply_text(
-        "🦉 Botdan foydalanish uchun /start bosing yoki quyidagi tugmalardan birini tanlang.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")]
-        ])
+        f"🤔 *'{msg_text}'* so'zi darslar lug'atidan topilmadi.\n\n"
+        "💡 *Maslahat:* Qidirish uchun so'zni polyakcha yoki o'zbekcha yozing (masalan: `salom`, `dzień`, `ish`, `urząd`).\n\n"
+        "Yoki quyidagi tugmalardan birini tanlang:",
+        parse_mode="Markdown",
+        reply_markup=kb_main(uid)
     )
 
 # ═══════════════════════════════════════════
@@ -1259,18 +1839,24 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("davom",    cmd_davom))
-    app.add_handler(CommandHandler("darslar",  cmd_darslar))
-    app.add_handler(CommandHandler("progress", cmd_progress))
-    app.add_handler(CommandHandler("lugat",    cmd_lugat))
-    app.add_handler(CommandHandler("premium",  cmd_premium))
-    app.add_handler(CommandHandler("admin",    cmd_admin))
-    app.add_handler(CommandHandler("grant",    cmd_grant))
-    app.add_handler(CommandHandler("id",       cmd_id))
-    app.add_handler(CommandHandler("myid",     cmd_id))
-    app.add_handler(CommandHandler("help",     payments.show_premium)) # or help
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("davom",     cmd_davom))
+    app.add_handler(CommandHandler("darslar",   cmd_darslar))
+    app.add_handler(CommandHandler("progress",  cmd_progress))
+    app.add_handler(CommandHandler("lugat",     cmd_lugat))
+    app.add_handler(CommandHandler("reyting",   cmd_reyting))
+    app.add_handler(CommandHandler("guide",     cmd_guide))
+    app.add_handler(CommandHandler("premium",   cmd_premium))
+    app.add_handler(CommandHandler("admin",     cmd_admin))
+    app.add_handler(CommandHandler("grant",     cmd_grant))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("backup",    cmd_backup))
+    app.add_handler(CommandHandler("reply",     cmd_reply))
+    app.add_handler(CommandHandler("id",        cmd_id))
+    app.add_handler(CommandHandler("myid",      cmd_id))
+    app.add_handler(CommandHandler("help",      payments.show_premium))
     app.add_handler(CallbackQueryHandler(on_cb))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.job_queue.run_repeating(daily_reminder, interval=60, first=10)
@@ -1286,7 +1872,9 @@ def main():
             BotCommand("davom",    "▶️ Darsni davom ettirish"),
             BotCommand("darslar",  "📚 Darslar"),
             BotCommand("progress", "📊 Progressim"),
-            BotCommand("lugat",    "📖 Lug'at"),
+            BotCommand("lugat",    "📖 Lug'at & Qidiruv"),
+            BotCommand("reyting",  "🏆 Peshqadamlar Reytingi"),
+            BotCommand("guide",    "🇵🇱 Polsha Hayoti Qo'llanmasi"),
             BotCommand("premium",  "💎 Premium Obuna"),
             BotCommand("admin",    "👑 Admin Paneli"),
         ])
