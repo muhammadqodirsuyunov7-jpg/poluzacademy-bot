@@ -19,11 +19,34 @@ from datetime import date
 
 logger = logging.getLogger(__name__)
 
+# .env faylni yuklash
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+
 DB_PATH = os.environ.get("DB_PATH", "polyakcha.db")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 DAILY_FREE_LIMIT = 5
+
+def get_api_key():
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        env_f = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_f):
+            with open(env_f, "r", encoding="utf-8") as f:
+                for l in f:
+                    l = l.strip()
+                    if l and not l.startswith("#") and l.startswith("GEMINI_API_KEY="):
+                        key = l.split("=", 1)[1].strip()
+                        os.environ["GEMINI_API_KEY"] = key
+                        break
+    return key
 
 # ═══════════════════════════════════════════
 # TIZIM PROMPTLARI (SYSTEM PROMPTS)
@@ -99,7 +122,7 @@ async def ask_gemini(
     Google Gemini 1.5 Flash API bilan bog'lanib javob qaytaradi.
     Matn yoki audio qabul qila oladi.
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = get_api_key()
     if not api_key:
         return (
             "⚠️ *Gemini API kaliti topilmadi!*\n\n"
@@ -153,30 +176,50 @@ async def ask_gemini(
         }
     }
 
-    url = f"{GEMINI_URL}?key={api_key}"
+    FALLBACK_MODELS = [
+        "gemini-3.6-flash",
+        "gemini-flash-latest",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-2.5-flash-lite"
+    ]
     headers = {"Content-Type": "application/json"}
 
+    last_status = None
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status != 200:
-                    err_body = await resp.text()
-                    logger.error(f"Gemini API xatoligi ({resp.status}): {err_body}")
-                    return f"❌ Kechirasiz, AI xizmatida xatolik yuz berdi ({resp.status}). Iltimos, keyinroq urinib ko'ring."
+            for m in FALLBACK_MODELS:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+                try:
+                    async with session.post(url, headers=headers, json=payload, timeout=25) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                first_cand = candidates[0]
+                                content = first_cand.get("content", {})
+                                parts = content.get("parts", [])
+                                if parts:
+                                    return parts[0].get("text", "").strip()
+                            return "Kechirasiz, javob olishda kutilmagan xatolik yuz berdi."
+                        else:
+                            last_status = resp.status
+                            err_body = await resp.text()
+                            logger.warning(f"Gemini model {m} xatoligi ({resp.status}): {err_body}")
+                            continue
+                except asyncio.TimeoutError:
+                    logger.warning(f"Gemini model {m} timeout bo'ldi, navbatdagisiga o'tilmoqda...")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Gemini model {m} ulanish xatosi: {e}, navbatdagisiga o'tilmoqda...")
+                    continue
 
-                data = await resp.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    first_cand = candidates[0]
-                    content = first_cand.get("content", {})
-                    parts = content.get("parts", [])
-                    if parts:
-                        return parts[0].get("text", "").strip()
-                return "Kechirasiz, javob olishda kutilmagan xatolik yuz berdi."
-    except asyncio.TimeoutError:
-        return "⏳ So'rov vaqti tugadi. Qayta urinib ko'ring."
+        if last_status:
+            return f"❌ Kechirasiz, AI xizmati hozirda band ({last_status}). Iltimos, bir ozdan keyin qayta urinib ko'ring."
+        return "⏳ So'rov vaqti tugadi. Iltimos, qayta urinib ko'ring."
     except Exception as e:
-        logger.error(f"Gemini API ulana olmadi: {e}")
+        logger.error(f"Gemini API umumiy xatolik: {e}")
         return f"❌ Xatolik yuz berdi: {e}"
 
 # ═══════════════════════════════════════════
