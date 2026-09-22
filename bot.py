@@ -47,6 +47,7 @@ import tts
 import dictionary_service
 import poland_guide
 import ai_assistant
+import i18n
 
 # ═══════════════════════════════════════════
 # SOZLAMALAR
@@ -145,6 +146,8 @@ def init_db():
         cur.execute("ALTER TABLE users ADD COLUMN ai_requests_today INTEGER DEFAULT 0")
     if "last_ai_date" not in user_cols:
         cur.execute("ALTER TABLE users ADD COLUMN last_ai_date TEXT")
+    if "lang" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'uz'")
     con.commit()
     con.close()
 
@@ -235,7 +238,7 @@ def get_user(uid):
 
 def ensure_user(uid, name):
     now = datetime.now().isoformat()
-    db("INSERT OR IGNORE INTO users (user_id, name, created_at, last_heart_regen) VALUES (?, ?, ?, ?)", (uid, name, now, now))
+    db("INSERT OR IGNORE INTO users (user_id, name, created_at, last_heart_regen, lang) VALUES (?, ?, ?, ?, 'uz')", (uid, name, now, now))
 
 def upd_user(uid, **kw):
     sets = ", ".join(f"{k}=?" for k in kw)
@@ -327,68 +330,30 @@ def get_continue_lesson(uid):
     return LESSON_ORDER[-1]
 
 # ═══════════════════════════════════════════
-# KLAVIATURALAR
+# KLAVIATURALAR (i18n orqali ko'p tilli)
 # ═══════════════════════════════════════════
-def kb_reply_main():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🤖 AI Ustoz"), KeyboardButton("▶️ Davom ettirish")],
-        [KeyboardButton("📚 Darslar"), KeyboardButton("📖 Lug'at & Qidiruv")],
-        [KeyboardButton("🇵🇱 Polsha hayoti"), KeyboardButton("🏆 Reyting")],
-        [KeyboardButton("💎 Premium"), KeyboardButton("👤 Profilim")],
-        [KeyboardButton("👥 Do'stlarni taklif qilish")],
-    ], resize_keyboard=True)
+def kb_reply_main(lang: str = "uz"):
+    return i18n.kb_reply_main(lang)
 
-def kb_main(uid: int = None):
-    prem_label = "💎 Premium Obuna"
-    if uid and payments.is_premium(uid):
-        prem_label = "💎 Premium (Faol ✅)"
+def kb_main(uid: int = None, lang: str = None):
+    if lang is None:
+        lang = i18n.get_user_lang(uid) if uid else "uz"
+    is_prem = payments.is_premium(uid) if uid else False
+    return i18n.kb_main(uid, is_premium=is_prem, lang=lang)
 
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 AI Ustoz (Google Gemini)", callback_data="ai_menu")],
-        [InlineKeyboardButton("▶️ Qolgan joyidan davom ettirish", callback_data="continue_lesson")],
-        [InlineKeyboardButton("📚 Darslar",    callback_data="lessons"),
-         InlineKeyboardButton("🔄 Boshidan boshlash", callback_data="restart_lessons")],
-        [InlineKeyboardButton("📖 Lug'at & Qidiruv", callback_data="vocab_menu"),
-         InlineKeyboardButton("📊 Progressim", callback_data="progress")],
-        [InlineKeyboardButton("🏆 Peshqadamlar Reytingi", callback_data="leaderboard"),
-         InlineKeyboardButton("🇵🇱 Polsha hayoti", callback_data="poland_guide")],
-        [InlineKeyboardButton("👥 Do'stlarni taklif qilish", callback_data="referral_info"),
-         InlineKeyboardButton(prem_label,      callback_data="premium_menu")],
-        [InlineKeyboardButton("⏰ Eslatma",    callback_data="reminder_menu"),
-         InlineKeyboardButton("ℹ️ Kurs haqida", callback_data="about")],
-        [InlineKeyboardButton("❓ Yordam",      callback_data="help")],
-    ])
-
-def kb_ai_menu(uid: int = None):
+def kb_ai_menu(uid: int = None, lang: str = None):
+    if lang is None:
+        lang = i18n.get_user_lang(uid) if uid else "uz"
     is_prem = payments.is_premium(uid) if uid else False
     used, remaining = ai_assistant.get_ai_quota_info(uid, is_prem) if uid else (0, 5)
-    quota_btn_txt = "💎 Cheksiz so'rovlar (Premium)" if is_prem else f"⚡️ Bugungi limit: {remaining}/5 ta qoldi"
+    return i18n.kb_ai_menu(uid, is_premium=is_prem, remaining=remaining, lang=lang)
 
-    buttons = [
-        [InlineKeyboardButton("💬 Erkin suhbat (AI Ustoz)", callback_data="ai_mode:chat")],
-        [InlineKeyboardButton("✍️ Grammatika & Matn tekshiruvi", callback_data="ai_mode:grammar")],
-        [InlineKeyboardButton("🎭 Situatsion rolli o'yinlar", callback_data="ai_roleplay_menu")],
-        [InlineKeyboardButton(quota_btn_txt, callback_data="premium_menu" if not is_prem else "ai_menu")],
-    ]
-    if not is_prem:
-        buttons.append([InlineKeyboardButton("💎 Cheksiz AI uchun Premium olish", callback_data="premium_menu")])
-    buttons.append([InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")])
-    return InlineKeyboardMarkup(buttons)
+def kb_ai_roleplay_menu(lang: str = "uz"):
+    return i18n.kb_ai_roleplay_menu(lang)
 
-def kb_ai_roleplay_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏛 Urząd (Karta Pobytu topshirish)", callback_data="ai_roleplay:roleplay_urzad")],
-        [InlineKeyboardButton("💼 Ish joyida (Kierownik bilan)", callback_data="ai_roleplay:roleplay_praca")],
-        [InlineKeyboardButton("🛒 Do'konda (Biedronka kassiri)", callback_data="ai_roleplay:roleplay_sklep")],
-        [InlineKeyboardButton("🏥 Shifoxona (NFZ shifokori)", callback_data="ai_roleplay:roleplay_lekarz")],
-        [InlineKeyboardButton("🔙 AI menyuga qaytish", callback_data="ai_menu")],
-    ])
+def kb_ai_active(mode: str = "chat", lang: str = "uz"):
+    return i18n.kb_ai_active(mode, lang)
 
-def kb_ai_active(mode: str = "chat"):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Suhbatni tozalash", callback_data="ai_clear_history"),
-         InlineKeyboardButton("🚪 AI rejimidan chiqish", callback_data="ai_exit")]
-    ])
 
 def kb_lessons(uid):
     done = done_lessons(uid)
@@ -499,6 +464,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parts = arg.split("_")
             plan = parts[1] if len(parts) > 1 else "oylik"
             exp = payments.activate_premium(u.id, plan, f"stripe_{arg}", payments.NARXLAR.get(plan, {}).get("narx", 2499))
+            lang = i18n.get_user_lang(u.id)
             await update.message.reply_text(
                 "🎉 *Tabriklaymiz! To'lovingiz muvaffaqiyatli qabul qilindi!*\n\n"
                 f"💎 Sizning *{plan.capitalize()}* Premium obunangiz faollashtirildi.\n"
@@ -511,57 +477,51 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    is_prem = payments.is_premium(u.id)
-    status_badge = "💎 *Premium Foydalanuvchi*" if is_prem else "🆓 *Dastlabki 5 ta dars bepul!*"
-
+    # Start bosilganda 3 ta tilni tanlash tugmasi chiqadi
     text = (
-        f"🦉 *Assalomu alaykum, {u.first_name}!*\n"
-        f"*PolUzAcademy Botiga xush kelibsiz!*\n\n"
-        "Bu bot orqali siz *polyak tilini* amaliy hayotda kerak bo'ladigan darajada "
-        "interaktiv o'yinlar, testlar va *🔊 jonli polyakcha ovozli talaffuz* orqali o'rganasiz!\n\n"
-        f"⭐️ Holatingiz: {status_badge}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📚 *Kurs tarkibi:*\n"
-        "🟢 *A1.1* — Boshlang'ich muloqot *(10 dars — 1-5 darslar bepul!)*\n"
-        "🔵 *A1.2* — Kundalik hayot, Do'kon, Ish *(10 dars)*\n"
-        "🟡 *A2.1* — Urząd, Hujjatlar, Ijara *(10 dars)*\n"
-        "🔴 *A2.2* — Shifokor, Ish muloqoti, Transport *(10 dars)*\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎮 *O'yin va O'rganish tizimi:*\n"
-        "🔊 *Ovozli talaffuz* — so'z va dialoglarni tinglang\n"
-        "⭐ *XP ballar* — har to'g'ri javob uchun +10 ball\n"
-        "❤️ *Yuraklar* — xatolar hisoblanadi (har 2 soatda tiklanadi)\n"
-        "🔥 *Streak* — ketma-ket o'rganish kunlari\n\n"
-        "⬇️ *Quyidagi tugmani bosing va boshlang!*"
+        f"🦉 *Assalomu alaykum, {u.first_name}! / Здравствуйте! / Salam!*\n\n"
+        "PolUzAcademy — polyak tilini professional o'rganish botiga xush kelibsiz!\n"
+        "Добро пожаловать в бот изучения польского языка!\n"
+        "Polýak dilini öwrenmek üçin bota hoş geldiňiz!\n\n"
+        "🌐 *Iltimos, o'zingizga qulay tilni tanlang:*\n"
+        "🇷🇺 *Пожалуйста, выберите язык обучения:*\n"
+        "🇹🇲 *Haýyş edýäris, okuw dilini saýlaň:*"
     )
-    # Doimiy pastki menyuni ochish va asosiy kartani chiqarish
-    await update.message.reply_text("👋 Boshqaruv tugmalari ekranning pastki qismida faollashdi.", reply_markup=kb_reply_main())
     await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=kb_main(u.id)
+        text,
+        parse_mode="Markdown",
+        reply_markup=i18n.kb_lang_select()
+    )
+
+async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    ensure_user(uid, update.effective_user.first_name)
+    lang = i18n.get_user_lang(uid)
+    await update.message.reply_text(
+        i18n.t("choose_language", lang),
+        parse_mode="Markdown",
+        reply_markup=i18n.kb_lang_select(include_back=False)
     )
 
 async def cmd_ai(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     ensure_user(uid, update.effective_user.first_name)
+    lang = i18n.get_user_lang(uid)
     is_prem = payments.is_premium(uid)
     used, remaining = ai_assistant.get_ai_quota_info(uid, is_prem)
 
-    status_txt = "💎 *Premium (Cheksiz)*" if is_prem else f"⚡️ *{remaining}/5 ta bepul so'rov qoldi*"
-
-    text = (
-        "🤖 *PolUzAcademy — AI Ustoz (Google Gemini)*\n\n"
-        "Sun'iy intellekt repetitori bilan polyak tilini 10 barobar tezroq va qulay o'rganing!\n\n"
-        f"📊 Sizning bugungi limitingiz: {status_txt}\n\n"
-        "Quyidagi imkoniyatlardan birini tanlang:\n"
-        "• 💬 *Erkin suhbat:* Grammatika, yangi so'zlar yoki tarjima bo'yicha savol bering.\n"
-        "• ✍️ *Grammatika tekshiruvi:* Polyakcha yozgan matnlaringizdagi xatolarni aniqlab, qoidasini tushuntiradi.\n"
-        "• 🎭 *Rolli o'yinlar:* Urząd, Ish, Do'kon va Shifoxonadagi real polyakcha muloqot mashqi.\n"
-        "• 🎙 *Ovozli muloqot:* Istalgan rejimda ovozli xabar (audio) yuborsangiz, AI uni tushunib javob beradi!"
-    )
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb_ai_menu(uid))
+    if is_prem:
+        quota_txt = "💎 *Premium (Cheksiz)*" if lang == "uz" else ("💎 *Премиум (Безлимитно)*" if lang == "ru" else "💎 *Premium (Çäksiz)*")
     else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb_ai_menu(uid))
+        quota_txt = f"⚡️ *{remaining}/5 ta bepul so'rov qoldi*" if lang == "uz" else (f"⚡️ *Осталось: {remaining}/5 бесплатных запросов*" if lang == "ru" else f"⚡️ *{remaining}/5 mugt sorag galdy*")
+
+    text = i18n.t("ai_title", lang, quota_txt=quota_txt)
+    reply_kb = i18n.kb_ai_menu(uid, is_prem, remaining, lang)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_kb)
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_kb)
 
 # ═══════════════════════════════════════════
 # ASOSIY CALLBACK HANDLER
@@ -577,93 +537,151 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await payments.payment_callback(update, ctx)
         return
 
+    # ── Tilni o'zgartirish ─────────────────────────
+    if d.startswith("set_lang:"):
+        lang = d.split(":", 1)[1]
+        i18n.set_user_lang(uid, lang)
+        is_prem = payments.is_premium(uid)
+        status_badge = "💎 *Premium*" if is_prem else ("🆓 *Dastlabki 5 ta dars bepul!*" if lang == "uz" else ("🆓 *Первые 5 уроков бесплатно!*" if lang == "ru" else "🆓 *Ilkinji 5 sapak mugt!*"))
+        
+        confirm_txt = i18n.t("lang_changed", lang)
+        await q.message.reply_text(confirm_txt, parse_mode="Markdown", reply_markup=i18n.kb_reply_main(lang))
+        
+        welcome_txt = i18n.t("welcome_header", lang, name=q.from_user.first_name, status_badge=status_badge)
+        await q.edit_message_text(welcome_txt, parse_mode="Markdown", reply_markup=i18n.kb_main(uid, is_prem, lang))
+        return
+
+    elif d == "change_lang":
+        lang = i18n.get_user_lang(uid)
+        txt = i18n.t("choose_language", lang)
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=i18n.kb_lang_select(include_back=True))
+        return
+
     # ── AI Ustoz Callbacklari ──────────────────────
-    if d == "ai_menu":
+    elif d == "ai_menu":
         await cmd_ai(update, ctx)
         return
 
     elif d == "ai_roleplay_menu":
-        text = (
-            "🎭 *Situatsion Rolli O'yinlar (Real Hayot Dialoglari)*\n\n"
-            "Polshadagi eng muhim hayotiy vaziyatlarda o'zingizni sinab ko'ring! "
-            "AI siz bilan haqiqiy polyak suhbatdoshi kabi muloqot qiladi.\n\n"
-            "🎙 Javoblaringizni matn yoki *ovozli xabar* orqali yuborishingiz mumkin!\n\n"
-            "Qaysi vaziyatni tanlaysiz?"
-        )
-        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb_ai_roleplay_menu())
+        lang = i18n.get_user_lang(uid)
+        if lang == "ru":
+            text = (
+                "🎭 *Ситуационные Ролевые Игры (Реальные Диалоги)*\n\n"
+                "Попробуйте себя в самых важных жизненных ситуациях в Польше! "
+                "ИИ будет общаться с вами как настоящий собеседник-поляк.\n\n"
+                "🎙 Вы можете писать текстом или отправлять *голосовые сообщения*!\n\n"
+                "Какую ситуацию выберете?"
+            )
+        elif lang == "tm":
+            text = (
+                "🎭 *Ýagdaýly Rollu Oýunlar (Hakyky Durmuş Gürrüňdeşlikleri)*\n\n"
+                "Polşadaky iň möhüm durmuş ýagdaýlarynda özüňizi synap görüň! "
+                "AI siz bilen hakyky polýak ýaly gürleşer.\n\n"
+                "🎙 Jogaplaryňyzy tekst ýa-da *sesli habar* arkaly iberip bilersiňiz!\n\n"
+                "Haýsy ýagdaýy saýlaýarsyňyz?"
+            )
+        else:
+            text = (
+                "🎭 *Situatsion Rolli O'yinlar (Real Hayot Dialoglari)*\n\n"
+                "Polshadagi eng muhim hayotiy vaziyatlarda o'zingizni sinab ko'ring! "
+                "AI siz bilan haqiqiy polyak suhbatdoshi kabi muloqot qiladi.\n\n"
+                "🎙 Javoblaringizni matn yoki *ovozli xabar* orqali yuborishingiz mumkin!\n\n"
+                "Qaysi vaziyatni tanlaysiz?"
+            )
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=i18n.kb_ai_roleplay_menu(lang))
         return
 
     elif d.startswith("ai_mode:"):
         mode = d.split(":", 1)[1]
         ctx.user_data["ai_mode"] = mode
         ctx.user_data["ai_history"] = []
+        lang = i18n.get_user_lang(uid)
 
         if mode == "chat":
-            text = (
-                "💬 *AI Ustoz — Savol-javob rejimi faollashdi!*\n\n"
-                "Polyak tili, grammatika qoidalari, so'zlar yoki tarjimalar haqida "
-                "istalgan savolingizni yozing yoki *ovozli xabar* yuboring.\n\n"
-                "💡 *Maslahat:* Masalan, `Być fe'lining tuslanishini tushuntirib ber`, "
-                "yoki `Urządga borganda nima deyish kerak?` deb so'rang.\n\n"
-                "_(Rejimdan chiqish uchun quyidagi tugmani bosing yoki /exit deb yozing)_"
-            )
+            if lang == "ru":
+                text = (
+                    "💬 *ИИ-Учитель — Режим вопрос-ответ активирован!*\n\n"
+                    "Задавайте любые вопросы по польскому языку, грамматике, словам или переводам, "
+                    "пишите текстом или отправляйте *голосовые сообщения*.\n\n"
+                    "_(Для выхода нажмите кнопку ниже или напишите /exit)_"
+                )
+            elif lang == "tm":
+                text = (
+                    "💬 *AI Halypa — Sorag-jogap tertibi işjeňleşdirildi!*\n\n"
+                    "Polýak dili, grammatika düzgünleri, sözler ýa-da terjimeler barada "
+                    "islendik soragyňyzy ýazyň ýa-da *sesli habar* iberiň.\n\n"
+                    "_(Tertipden çykmak üçin aşakdaky düwmä basyň ýa-da /exit ýazyň)_"
+                )
+            else:
+                text = (
+                    "💬 *AI Ustoz — Savol-javob rejimi faollashdi!*\n\n"
+                    "Polyak tili, grammatika qoidalari, so'zlar yoki tarjimalar haqida "
+                    "istalgan savolingizni yozing yoki *ovozli xabar* yuboring.\n\n"
+                    "💡 *Maslahat:* Masalan, `Być fe'lining tuslanishini tushuntirib ber`, "
+                    "yoki `Urządga borganda nima deyish kerak?` deb so'rang.\n\n"
+                    "_(Rejimdan chiqish uchun quyidagi tugmani bosing yoki /exit deb yozing)_"
+                )
         elif mode == "grammar":
-            text = (
-                "✍️ *Grammatika va Matn Tekshiruvi faollashdi!*\n\n"
-                "O'zingiz tuzgan yoki tekshirmoqchi bo'lgan polyakcha gap yoki matnni yuboring.\n\n"
-                "AI Ustoz xatolaringizni aniqlab, to'g'ri variantini ko'rsatadi va qoidasini "
-                "o'zbek tilida batafsil tushuntirib beradi.\n\n"
-                "_(Rejimdan chiqish uchun quyidagi tugmani bosing yoki /exit deb yozing)_"
-            )
+            if lang == "ru":
+                text = (
+                    "✍️ *Проверка грамматики и текста активирована!*\n\n"
+                    "Отправьте предложение или текст на польском языке, который хотите проверить.\n\n"
+                    "ИИ найдет ошибки, покажет правильный вариант и доступно объяснит правила на русском языке.\n\n"
+                    "_(Для выхода нажмите кнопку ниже или напишите /exit)_"
+                )
+            elif lang == "tm":
+                text = (
+                    "✍️ *Grammatika we tekst barlagy işjeňleşdirildi!*\n\n"
+                    "Barlatmak isleýän polýakça sözlemiňizi ýa-da tekstiňizi iberiň.\n\n"
+                    "AI Halypa ýalňyşlaryňyzy tapyp, dogry görnüşini görkezer we düzgünini türkmen dilinde düşündirer.\n\n"
+                    "_(Tertipden çykmak üçin aşakdaky düwmä basyň ýa-da /exit ýazyň)_"
+                )
+            else:
+                text = (
+                    "✍️ *Grammatika va Matn Tekshiruvi faollashdi!*\n\n"
+                    "O'zingiz tuzgan yoki tekshirmoqchi bo'lgan polyakcha gap yoki matnni yuboring.\n\n"
+                    "AI Ustoz xatolaringizni aniqlab, to'g'ri variantini ko'rsatadi va qoidasini "
+                    "o'zbek tilida batafsil tushuntirib beradi.\n\n"
+                    "_(Rejimdan chiqish uchun quyidagi tugmani bosing yoki /exit deb yozing)_"
+                )
         else:
-            text = "🤖 *AI Ustoz rejimi faol.* Xabaringizni yuboring:"
-        await q.message.reply_text(text, parse_mode="Markdown", reply_markup=kb_ai_active(mode))
+            text = "🤖 *AI Ustoz rejimi faol.*"
+        await q.message.reply_text(text, parse_mode="Markdown", reply_markup=i18n.kb_ai_active(mode, lang))
         return
 
     elif d.startswith("ai_roleplay:"):
         rp_type = d.split(":", 1)[1]
         ctx.user_data["ai_mode"] = rp_type
         ctx.user_data["ai_history"] = []
+        lang = i18n.get_user_lang(uid)
 
         intro_text = ""
         polish_starter = ""
 
         if rp_type == "roleplay_urzad":
-            intro_text = (
-                "🏛 *Urząd Wojewódzki (Karta Pobytu) — Dialog boshlandi!*\n\n"
-                "👨‍💼 *Urzędnik:* „Dzień dobry! W czym mogę Panu/Pani pomóc? Czy przyszedł Pan złożyć wniosek o kartę pobytu?”\n"
-                "_(Xayrli kun! Sizga qanday yordam bera olaman? Karta pobytu arizasini topshirishga keldingizmi?)_\n\n"
-                "🎙 Javobingizni polyakcha matn yoki *ovozli xabar* qilib yuboring!"
-            )
+            hint = "_(Xayrli kun! Sizga qanday yordam bera olaman? Karta pobytu arizasini topshirishga keldingizmi?)_" if lang == "uz" else ("_(Добрый день! Чем могу помочь? Вы пришли подать заявление на карту побыту?)_" if lang == "ru" else "_(Salam! Size nähili kömek edip bilerin? Karta pobytu tabşyrmaga geldiňizmi?)_")
+            call_action = "🎙 Javobingizni matn yoki *ovozli xabar* qilib yuboring!" if lang == "uz" else ("🎙 Отправьте ответ текстом или *голосовым сообщением*!" if lang == "ru" else "🎙 Jogabyňyzy tekst ýa-da *sesli habar* bilen iberiň!")
+            intro_text = f"🏛 *Urząd Wojewódzki (Karta Pobytu)*\n\n👨‍💼 *Urzędnik:* „Dzień dobry! W czym mogę Panu/Pani pomóc? Czy przyszedł Pan złożyć wniosek o kartę pobytu?”\n{hint}\n\n{call_action}"
             polish_starter = "Dzień dobry! W czym mogę Panu pomóc? Czy przyszedł Pan złożyć wniosek o kartę pobytu?"
         elif rp_type == "roleplay_praca":
-            intro_text = (
-                "💼 *Ish joyi (Magazin / Zavod) — Dialog boshlandi!*\n\n"
-                "👷‍♂️ *Kierownik (Marek):* „Cześć! Dobrze, że jesteś. Jak idzie dzisiejsza praca na Twoim stanowisku?”\n"
-                "_(Salom! Kelganing yaxshi bo'ldi. Bugungi ish qanday ketyapti?)_\n\n"
-                "🎙 Javobingizni polyakcha matn yoki *ovozli xabar* qilib yuboring!"
-            )
+            hint = "_(Salom! Kelganing yaxshi bo'ldi. Bugungi ish qanday ketyapti?)_" if lang == "uz" else ("_(Привет! Рад, что ты пришел. Как идут дела на твоем рабочем месте?)_" if lang == "ru" else "_(Salam! Geleniň gowy boldy. Şu günki iş nähili gidýär?)_")
+            call_action = "🎙 Javobingizni matn yoki *ovozli xabar* qilib yuboring!" if lang == "uz" else ("🎙 Отправьте ответ текстом или *голосовым сообщением*!" if lang == "ru" else "🎙 Jogabyňyzy tekst ýa-da *sesli habar* bilen iberiň!")
+            intro_text = f"💼 *Praca / Magazyn (Kierownik Marek)*\n\n👷‍♂️ *Kierownik (Marek):* „Cześć! Dobrze, że jesteś. Jak idzie dzisiejsza praca na Twoim stanowisku?”\n{hint}\n\n{call_action}"
             polish_starter = "Cześć! Dobrze, że jesteś. Jak idzie dzisiejsza praca na Twoim stanowisku?"
         elif rp_type == "roleplay_sklep":
-            intro_text = (
-                "🛒 *Supermarket (Biedronka) — Dialog boshlandi!*\n\n"
-                "👩‍💼 *Kasjer:* „Dzień dobry! Czy ma Pan naszą kartę Moja Biedronka?”\n"
-                "_(Xayrli kun! Moja Biedronka kartangiz bormi?)_\n\n"
-                "🎙 Javobingizni polyakcha matn yoki *ovozli xabar* qilib yuboring!"
-            )
+            hint = "_(Xayrli kun! Moja Biedronka kartangiz bormi?)_" if lang == "uz" else ("_(Добрый день! У вас есть карта Moja Biedronka?)_" if lang == "ru" else "_(Salam! Moja Biedronka kartyňyz barmy?)_")
+            call_action = "🎙 Javobingizni matn yoki *ovozli xabar* qilib yuboring!" if lang == "uz" else ("🎙 Отправьте ответ текстом или *голосовым сообщением*!" if lang == "ru" else "🎙 Jogabyňyzy tekst ýa-da *sesli habar* bilen iberiň!")
+            intro_text = f"🛒 *Supermarket (Biedronka)*\n\n👩‍💼 *Kasjer:* „Dzień dobry! Czy ma Pan naszą kartę Moja Biedronka?”\n{hint}\n\n{call_action}"
             polish_starter = "Dzień dobry! Czy ma Pan naszą kartę Moja Biedronka?"
         elif rp_type == "roleplay_lekarz":
-            intro_text = (
-                "🏥 *Shifoxona (NFZ Shifokor) — Dialog boshlandi!*\n\n"
-                "👨‍⚕️ *Lekarz:* „Dzień dobry, proszę usiąść. Co Panu dolega? Jakie ma Pan objawy?”\n"
-                "_(Xayrli kun, o'tiring. Nima bezovta qilyapti? Qanday alomatlar bor?)_\n\n"
-                "🎙 Javobingizni polyakcha matn yoki *ovozli xabar* qilib yuboring!"
-            )
+            hint = "_(Xayrli kun, o'tiring. Nima bezovta qilyapti? Qanday alomatlar bor?)_" if lang == "uz" else ("_(Добрый день, присаживайтесь. Что вас беспокоит? Какие симптомы?)_" if lang == "ru" else "_(Salam, geçiň, otyryň. Nämäňiz agyrýar? Nähili alamatlar bar?)_")
+            call_action = "🎙 Javobingizni matn yoki *ovozli xabar* qilib yuboring!" if lang == "uz" else ("🎙 Отправьте ответ текстом или *голосовым сообщением*!" if lang == "ru" else "🎙 Jogabyňyzy tekst ýa-da *sesli habar* bilen iberiň!")
+            intro_text = f"🏥 *Przychodnia NFZ (Lekarz)*\n\n👨‍⚕️ *Lekarz:* „Dzień dobry, proszę usiąść. Co Panu dolega? Jakie ma Pan objawy?”\n{hint}\n\n{call_action}"
             polish_starter = "Dzień dobry, proszę usiąść. Co Panu dolega? Jakie ma Pan objawy?"
 
         ctx.user_data["ai_history"].append({"role": "model", "content": polish_starter})
 
-        await q.message.reply_text(intro_text, parse_mode="Markdown", reply_markup=kb_ai_active(rp_type))
+        await q.message.reply_text(intro_text, parse_mode="Markdown", reply_markup=i18n.kb_ai_active(rp_type, lang))
         if polish_starter:
             try:
                 audio_file = await tts.generate_speech(polish_starter)
@@ -676,14 +694,17 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d == "ai_clear_history":
         ctx.user_data["ai_history"] = []
-        await q.message.reply_text("🔄 Suhbat tarixi tozalandi. Yangi savolingizni yuborishingiz mumkin.", reply_markup=kb_ai_active(ctx.user_data.get("ai_mode", "chat")))
+        lang = i18n.get_user_lang(uid)
+        await q.message.reply_text(i18n.t("ai_cleared", lang), reply_markup=i18n.kb_ai_active(ctx.user_data.get("ai_mode", "chat"), lang))
         return
 
     elif d == "ai_exit":
         ctx.user_data.pop("ai_mode", None)
         ctx.user_data.pop("ai_history", None)
-        await q.message.reply_text("🚪 *AI Ustoz rejimidan chiqildi.* Bosh menyudasiz.", parse_mode="Markdown", reply_markup=kb_reply_main())
-        await q.message.reply_text("Quyidagi bo'limlardan birini tanlashingiz mumkin:", reply_markup=kb_main(uid))
+        lang = i18n.get_user_lang(uid)
+        is_prem = payments.is_premium(uid)
+        await q.message.reply_text(i18n.t("ai_exited", lang), parse_mode="Markdown", reply_markup=i18n.kb_reply_main(lang))
+        await q.message.reply_text(i18n.t("in_main", lang), reply_markup=i18n.kb_main(uid, is_prem, lang))
         return
 
     # ── Bosh menyu ──────────────────────────────────
@@ -691,22 +712,29 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         u = get_user(uid) or {}
         lvl_p = level_progress(uid)
         is_prem = payments.is_premium(uid)
-        status_txt = "💎 Premium Obunachi ✅" if is_prem else "🆓 Bepul versiya"
-        h_txt = heart_status_text(u)
+        lang = i18n.get_user_lang(uid)
+        if lang == "ru":
+            status_txt = "💎 Премиум Подписчик ✅" if is_prem else "🆓 Бесплатная версия"
+        elif lang == "tm":
+            status_txt = "💎 Premium Ýazylyjy ✅" if is_prem else "🆓 Mugt wersiýa"
+        else:
+            status_txt = "💎 Premium Obunachi ✅" if is_prem else "🆓 Bepul versiya"
 
-        text = (
-            f"🦉 *PolUzAcademy — Bosh Menyu*\n\n"
-            f"👤 *{q.from_user.first_name}* ({status_txt})\n\n"
-            f"🔥 Streak: *{u.get('streak',0)} kun*\n"
-            f"⭐ XP: *{u.get('xp',0)}*\n"
-            f"❤️ Yuraklar: *{h_txt}*\n\n"
-            f"📗 A1.1: *{lvl_p.get('A1.1',0)}/10* dars\n"
-            f"📘 A1.2: *{lvl_p.get('A1.2',0)}/10* dars\n"
-            f"📙 A2.1: *{lvl_p.get('A2.1',0)}/10* dars\n"
-            f"📕 A2.2: *{lvl_p.get('A2.2',0)}/10* dars\n\n"
-            "Nima qilamiz?"
+        h_txt = heart_status_text(u)
+        text = i18n.t(
+            "main_menu_card",
+            lang,
+            name=q.from_user.first_name,
+            status_txt=status_txt,
+            streak=u.get('streak', 0),
+            xp=u.get('xp', 0),
+            hearts=h_txt,
+            a1_1=lvl_p.get('A1.1', 0),
+            a1_2=lvl_p.get('A1.2', 0),
+            a2_1=lvl_p.get('A2.1', 0),
+            a2_2=lvl_p.get('A2.2', 0)
         )
-        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb_main(uid))
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=i18n.kb_main(uid, is_prem, lang))
 
     # ── Kurs haqida ─────────────────────────────────
     elif d == "about":
@@ -1911,9 +1939,15 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg_text = update.message.text.strip()
     uid = update.effective_user.id
     ensure_user(uid, update.effective_user.first_name)
+    user_lang = i18n.get_user_lang(uid)
+    is_prem = payments.is_premium(uid)
 
     # 1. AI Ustoz menyusini ochish
-    if msg_text in ["🤖 AI Ustoz", "/ai", "AI Ustoz", "ai"]:
+    ai_triggers = [
+        "🤖 AI Ustoz", "🤖 AI Учитель", "🤖 AI Halypa",
+        "/ai", "AI Ustoz", "ai", "ai ustoz", "ai halypa", "ai учитель"
+    ]
+    if msg_text in ai_triggers:
         await cmd_ai(update, ctx)
         return
 
@@ -1921,60 +1955,80 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ai_mode = ctx.user_data.get("ai_mode")
     if ai_mode:
         # Rejimdan chiqish buyruqlari
-        if msg_text.lower() in ["/exit", "chiqish", "exit", "orqaga", "stop", "tugatish"]:
+        exit_phrases = [
+            "/exit", "chiqish", "exit", "orqaga", "stop", "tugatish",
+            "выход", "назад", "стоп",
+            "çykyş", "yzyna"
+        ]
+        if msg_text.lower() in exit_phrases:
             ctx.user_data.pop("ai_mode", None)
             ctx.user_data.pop("ai_history", None)
             await update.message.reply_text(
-                "🚪 *AI Ustoz rejimidan chiqildi.* Bosh menyudasiz.",
+                i18n.t("ai_exited", user_lang),
                 parse_mode="Markdown",
-                reply_markup=kb_reply_main()
+                reply_markup=i18n.kb_reply_main(user_lang)
             )
-            await update.message.reply_text("Nima qilamiz?", reply_markup=kb_main(uid))
+            await update.message.reply_text(
+                "🦉" if user_lang != "uz" else "Nima qilamiz?",
+                reply_markup=i18n.kb_main(uid, is_prem, user_lang)
+            )
             return
 
         # Agar pastki menyu tugmalari bosilsa, AI rejimini yopib menyuga o'tish
-        if msg_text in ["▶️ Davom ettirish", "📚 Darslar", "📖 Lug'at & Qidiruv", "🏆 Reyting", "🇵🇱 Polsha hayoti", "👤 Profilim", "💎 Premium", "👥 Do'stlarni taklif qilish", "👥 Taklif qilish"]:
+        nav_buttons = [
+            "▶️ Davom ettirish", "▶️ Продолжить", "▶️ Dowam etmek",
+            "📚 Darslar", "📚 Уроки", "📚 Sapaklar",
+            "📖 Lug'at & Qidiruv", "📖 Словарь & Поиск", "📖 Sözlük & Gözleg",
+            "🏆 Reyting", "🏆 Рейтинг", "🏆 Reýting",
+            "🇵🇱 Polsha hayoti", "🇵🇱 Жизнь в Польше", "🇵🇱 Polşada durmuş",
+            "👤 Profilim", "👤 Мой профиль",
+            "💎 Premium", "💎 Премиум",
+            "👥 Do'stlarni taklif qilish", "👥 Пригласить друзей", "👥 Dostlary çagyrmak", "👥 Taklif qilish"
+        ]
+        if msg_text in nav_buttons:
             ctx.user_data.pop("ai_mode", None)
             ctx.user_data.pop("ai_history", None)
             # Pastdagi tugmalar handleriga o'tadi
         else:
             # AI savol-javobini bajarish
-            is_prem = payments.is_premium(uid)
             allowed, remaining = ai_assistant.check_and_use_ai_quota(uid, is_prem)
             if not allowed:
+                prem_btn_txt = i18n.t("btn_premium", user_lang)
+                exit_btn_txt = i18n.t("ai_btn_exit", user_lang)
                 await update.message.reply_text(
-                    "⚠️ *Kunlik bepul AI so'rovlaringiz (5 ta) tugadi!*\n\n"
-                    "💎 *Premium obuna* orqali siz sun'iy intellekt repetitoridan **mutlaqo cheksiz** foydalanishingiz mumkin.\n"
-                    "Yoki yangi so'rovlar uchun ertangi kunni kuting.",
+                    i18n.t("ai_quota_exceeded", user_lang),
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("💎 Premium obuna olish", callback_data="premium_menu")],
-                        [InlineKeyboardButton("🚪 AI rejimidan chiqish", callback_data="ai_exit")]
+                        [InlineKeyboardButton(prem_btn_txt, callback_data="premium_menu")],
+                        [InlineKeyboardButton(exit_btn_txt, callback_data="ai_exit")]
                     ])
                 )
                 return
 
             await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
             history = ctx.user_data.get("ai_history", [])
-            reply_text = await ai_assistant.ask_gemini(msg_text, mode=ai_mode, history=history)
+            reply_text = await ai_assistant.ask_gemini(msg_text, mode=ai_mode, history=history, lang=user_lang)
 
             history.append({"role": "user", "content": msg_text})
             history.append({"role": "model", "content": reply_text})
             ctx.user_data["ai_history"] = history[-8:]
 
-            quota_note = "💎 Cheksiz" if is_prem else f"⚡️ Bugun qoldi: {remaining} ta"
+            if is_prem:
+                quota_note = "💎 " + ("Cheksiz" if user_lang == "uz" else ("Безлимитно" if user_lang == "ru" else "Çäksiz"))
+            else:
+                quota_note = f"⚡️ Bugun qoldi: {remaining} ta" if user_lang == "uz" else (f"⚡️ Осталось: {remaining}" if user_lang == "ru" else f"⚡️ Şu gün galdy: {remaining}")
             footer = f"\n\n_({quota_note})_"
 
             try:
                 await update.message.reply_text(
                     reply_text + footer,
                     parse_mode="Markdown",
-                    reply_markup=kb_ai_active(ai_mode)
+                    reply_markup=i18n.kb_ai_active(ai_mode, user_lang)
                 )
             except Exception:
                 await update.message.reply_text(
                     reply_text + f"\n\n({quota_note})",
-                    reply_markup=kb_ai_active(ai_mode)
+                    reply_markup=i18n.kb_ai_active(ai_mode, user_lang)
                 )
 
             # Rolli o'yinda javobning polyakcha qismini ovozli jo'natish
@@ -1991,29 +2045,29 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         logger.error(f"TTS voice reply error: {e}")
             return
 
-    # 3. Pastki klaviatura tugmalarini qayta ishlash
-    if msg_text == "▶️ Davom ettirish":
+    # 3. Pastki klaviatura tugmalarini qayta ishlash (O'zbek, Rus, Turkman)
+    if msg_text in ["▶️ Davom ettirish", "▶️ Продолжить", "▶️ Dowam etmek"]:
         await cmd_davom(update, ctx)
         return
-    elif msg_text == "📚 Darslar":
+    elif msg_text in ["📚 Darslar", "📚 Уроки", "📚 Sapaklar"]:
         await cmd_darslar(update, ctx)
         return
-    elif msg_text == "📖 Lug'at & Qidiruv":
+    elif msg_text in ["📖 Lug'at & Qidiruv", "📖 Словарь & Поиск", "📖 Sözlük & Gözleg"]:
         await cmd_lugat(update, ctx)
         return
-    elif msg_text == "🏆 Reyting":
+    elif msg_text in ["🏆 Reyting", "🏆 Рейтинг", "🏆 Reýting"]:
         await cmd_reyting(update, ctx)
         return
-    elif msg_text == "🇵🇱 Polsha hayoti":
+    elif msg_text in ["🇵🇱 Polsha hayoti", "🇵🇱 Жизнь в Польше", "🇵🇱 Polşada durmuş"]:
         await cmd_guide(update, ctx)
         return
-    elif msg_text == "👤 Profilim":
+    elif msg_text in ["👤 Profilim", "👤 Мой профиль"]:
         await cmd_progress(update, ctx)
         return
-    elif msg_text == "💎 Premium":
+    elif msg_text in ["💎 Premium", "💎 Премиум"]:
         await payments.show_premium(update, ctx)
         return
-    elif msg_text in ["👥 Do'stlarni taklif qilish", "👥 Taklif qilish"]:
+    elif msg_text in ["👥 Do'stlarni taklif qilish", "👥 Пригласить друзей", "👥 Dostlary çagyrmak", "👥 Taklif qilish"]:
         await show_referral_msg(update, ctx)
         return
 
@@ -2037,7 +2091,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if i <= 3:
                 buttons.append([InlineKeyboardButton(f"🔊 '{item['pl']}' talaffuzi", callback_data=f"tts_word:{item['pl']}")])
 
-        buttons.append([InlineKeyboardButton("🏠 Bosh menyu", callback_data="main")])
+        buttons.append([InlineKeyboardButton(i18n.t("in_main", user_lang), callback_data="main")])
         await update.message.reply_text(
             res_text,
             parse_mode="Markdown",
@@ -2046,13 +2100,31 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # 6. Agar so'z topilmasa
+    if user_lang == "ru":
+        no_match_text = (
+            f"🤔 Слово *'{msg_text}'* не найдено в словаре уроков.\n\n"
+            "💡 *Совет:* Для поиска введите слово на польском (например: `dzień`, `praca`, `urząd`).\n"
+            "Или задайте вопрос в разделе **🤖 AI Учитель**!\n\n"
+            "Выберите один из разделов ниже:"
+        )
+    elif user_lang == "tm":
+        no_match_text = (
+            f"🤔 *'{msg_text}'* sözi sapaklar sözlüginden tapylmady.\n\n"
+            "💡 *Maslahat:* Gözlemek üçin sözi polýakça ýazyň (meselem: `dzień`, `praca`, `urząd`).\n"
+            "Ýa-da soragyňyz bar bolsa, **🤖 AI Halypa** bölümine ýüz tutuň!\n\n"
+            "Aşakdaky bölümlerden birini saýlaň:"
+        )
+    else:
+        no_match_text = (
+            f"🤔 *'{msg_text}'* so'zi darslar lug'atidan topilmadi.\n\n"
+            "💡 *Maslahat:* Qidirish uchun so'zni polyakcha yoki o'zbekcha yozing (masalan: `salom`, `dzień`, `ish`, `urząd`).\n"
+            "Yoki savolingiz bo'lsa, **🤖 AI Ustoz** bo'limiga murojaat qiling!\n\n"
+            "Quyidagi tugmalardan birini tanlang:"
+        )
     await update.message.reply_text(
-        f"🤔 *'{msg_text}'* so'zi darslar lug'atidan topilmadi.\n\n"
-        "💡 *Maslahat:* Qidirish uchun so'zni polyakcha yoki o'zbekcha yozing (masalan: `salom`, `dzień`, `ish`, `urząd`).\n"
-        "Yoki savolingiz bo'lsa, **🤖 AI Ustoz** bo'limiga murojaat qiling!\n\n"
-        "Quyidagi tugmalardan birini tanlang:",
+        no_match_text,
         parse_mode="Markdown",
-        reply_markup=kb_main(uid)
+        reply_markup=i18n.kb_main(uid, is_prem, user_lang)
     )
 
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2066,23 +2138,30 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not voice:
         return
 
+    user_lang = i18n.get_user_lang(uid)
     ai_mode = ctx.user_data.get("ai_mode", "chat")
     is_prem = payments.is_premium(uid)
 
     allowed, remaining = ai_assistant.check_and_use_ai_quota(uid, is_prem)
     if not allowed:
+        prem_btn_txt = i18n.t("btn_premium", user_lang)
+        exit_btn_txt = i18n.t("ai_btn_exit", user_lang)
         await update.message.reply_text(
-            "⚠️ *Kunlik bepul AI so'rovlaringiz (5 ta) tugadi!*\n\n"
-            "Ovozli muloqot va cheksiz AI repetitordan foydalanish uchun *Premium obuna*ga o'ting.",
+            i18n.t("ai_quota_exceeded", user_lang),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💎 Premium obuna olish", callback_data="premium_menu")],
-                [InlineKeyboardButton("🚪 AI rejimidan chiqish", callback_data="ai_exit")]
+                [InlineKeyboardButton(prem_btn_txt, callback_data="premium_menu")],
+                [InlineKeyboardButton(exit_btn_txt, callback_data="ai_exit")]
             ])
         )
         return
 
-    status_msg = await update.message.reply_text("🎧 _Ovozingiz tinglanmoqda va tahlil qilinmoqda..._", parse_mode="Markdown")
+    listening_txt = (
+        "🎧 _Голос обрабатывается и анализируется..._" if user_lang == "ru"
+        else ("🎧 _Sesiňiz diňlenilýär we derňelýär..._" if user_lang == "tm"
+        else "🎧 _Ovozingiz tinglanmoqda va tahlil qilinmoqda..._")
+    )
+    status_msg = await update.message.reply_text(listening_txt, parse_mode="Markdown")
     await ctx.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
 
     try:
@@ -2091,25 +2170,37 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         audio_bytes = bytes(audio_byte_array)
 
         history = ctx.user_data.get("ai_history", [])
+
+        audio_prompts = {
+            "uz": "Ushbu yuborilgan audio xabarni tinglab, to'liq tushunib, polyak tilini o'rganuvchiga mos ravishda o'zbek tilida tushuntirish berib javob bering.",
+            "ru": "Прослушай это аудиосообщение, пойми его и ответь изучающему польский язык с пояснениями на русском языке.",
+            "tm": "Bu iberilen sesli habary diňläp, polýak dilini öwrenijä laýyk edip türkmen dilinde düşündiriş bilen jogap beriň."
+        }
+        audio_prompt = audio_prompts.get(user_lang, audio_prompts["uz"])
+
         reply_text = await ai_assistant.ask_gemini(
-            prompt="Ushbu yuborilgan audio xabarni tinglab, to'liq tushunib, polyak tilini o'rganuvchiga mos ravishda javob bering.",
+            prompt=audio_prompt,
             mode=ai_mode,
             history=history,
             audio_bytes=audio_bytes,
-            mime_type="audio/ogg"
+            mime_type="audio/ogg",
+            lang=user_lang
         )
 
         history.append({"role": "user", "content": "[Ovozli xabar]"})
         history.append({"role": "model", "content": reply_text})
         ctx.user_data["ai_history"] = history[-8:]
 
-        quota_note = "💎 Cheksiz" if is_prem else f"⚡️ Bugun qoldi: {remaining} ta"
+        if is_prem:
+            quota_note = "💎 " + ("Cheksiz" if user_lang == "uz" else ("Безлимитно" if user_lang == "ru" else "Çäksiz"))
+        else:
+            quota_note = f"⚡️ Bugun qoldi: {remaining} ta" if user_lang == "uz" else (f"⚡️ Осталось: {remaining}" if user_lang == "ru" else f"⚡️ Şu gün galdy: {remaining}")
         footer = f"\n\n_({quota_note})_"
 
         try:
-            await status_msg.edit_text(reply_text + footer, parse_mode="Markdown", reply_markup=kb_ai_active(ai_mode))
+            await status_msg.edit_text(reply_text + footer, parse_mode="Markdown", reply_markup=i18n.kb_ai_active(ai_mode, user_lang))
         except Exception:
-            await status_msg.edit_text(reply_text + f"\n\n({quota_note})", reply_markup=kb_ai_active(ai_mode))
+            await status_msg.edit_text(reply_text + f"\n\n({quota_note})", reply_markup=i18n.kb_ai_active(ai_mode, user_lang))
 
         # Agar rol o'yini bo'lsa, qahramon javobini ovozli yuborish
         if ai_mode.startswith("roleplay_"):
@@ -2126,7 +2217,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Ovozli xabarni qayta ishlashda xatolik: {e}")
-        await status_msg.edit_text(f"❌ Ovozni qayta ishlashda xatolik yuz berdi: {e}")
+        err_txt = "❌ Ошибка при обработке голоса" if user_lang == "ru" else ("❌ Sesi gaýtadan işlemekde ýalňyşlyk" if user_lang == "tm" else "❌ Ovozni qayta ishlashda xatolik yuz berdi")
+        await status_msg.edit_text(f"{err_txt}: {e}")
 
 # ═══════════════════════════════════════════
 # RENDER.COM UCHUN HEALTH CHECK SERVER
@@ -2164,6 +2256,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("lang",      cmd_lang))
+    app.add_handler(CommandHandler("til",       cmd_lang))
     app.add_handler(CommandHandler("davom",     cmd_davom))
     app.add_handler(CommandHandler("darslar",   cmd_darslar))
     app.add_handler(CommandHandler("progress",  cmd_progress))
@@ -2194,7 +2288,8 @@ def main():
 
     async def post_init(application):
         await application.bot.set_my_commands([
-            BotCommand("start",    "🦉 Bosh menyu"),
+            BotCommand("start",    "🦉 Bosh menyu / Главное меню / Baş menýu"),
+            BotCommand("lang",     "🌐 Til / Язык / Dil"),
             BotCommand("ai",       "🤖 AI Ustoz (Gemini)"),
             BotCommand("davom",    "▶️ Darsni davom ettirish"),
             BotCommand("darslar",  "📚 Darslar"),
